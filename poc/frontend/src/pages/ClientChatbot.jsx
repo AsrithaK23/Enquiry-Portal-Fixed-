@@ -29,20 +29,39 @@ export default function ClientChatbot({ user }) {
 
   useEffect(() => { loadMyEnquiries(); }, [loadMyEnquiries]);
 
-  async function startChat() {
-    setLoading(true);
-    try {
-      const res = await API.post('/api/chat/start');
-      setSessionId(res.data.session_id);
-      setState(res.data.state);
-      setMessages([{ sender: 'bot', message: res.data.message, time: now() }]);
-      setStarted(true);
-    } catch {
-      setMessages([{ sender: 'bot', message: 'Could not connect. Is the backend running?', time: now() }]);
-      setStarted(true);
-    }
-    setLoading(false);
+async function startChat() {
+  setLoading(true);
+
+  try {
+    const res = await API.post('/api/chat/start', {
+      client_id: user.client_id,
+      user_name: user.name,
+    });
+
+    setSessionId(res.data.session_id);
+    setState(res.data.state);
+    setContext(res.data.context || {});
+    setMessages([
+      {
+        sender: 'bot',
+        message: res.data.message,
+        time: now(),
+      },
+    ]);
+    setStarted(true);
+  } catch {
+    setMessages([
+      {
+        sender: 'bot',
+        message: 'Could not connect. Is the backend running?',
+        time: now(),
+      },
+    ]);
+    setStarted(true);
   }
+
+  setLoading(false);
+}
 
   async function sendMessage(e) {
     e?.preventDefault();
@@ -82,8 +101,8 @@ export default function ClientChatbot({ user }) {
   };
 
   function pillClick(text) {
-    if (text === 'Raise a new enquiry') return submitDirect('1');
-    if (text === 'Check status')        return submitDirect('2');
+    if (text === 'Raise a new enquiry') return submitDirect('I want to raise a new enquiry');
+    if (text === 'Check status')        return submitDirect('What is the status of my enquiries?');
     return submitDirect(text);
   }
 
@@ -93,8 +112,11 @@ export default function ClientChatbot({ user }) {
     setMessages(m => [...m, { sender: 'user', message: text, time: now() }]);
     setLoading(true);
     try {
-      const res = await API.post('/api/chat/message', {
-        session_id: sessionId, message: text, state, context,
+      const res = await API.post("/api/chat/message", {
+        session_id: sessionId,
+        message: text,
+        state: state,
+        context: context,
       });
       setState(res.data.state);
       setContext(res.data.context || {});

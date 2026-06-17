@@ -68,6 +68,16 @@ def client_enquiry_list(client, detailed=False):
         return "\n\n".join(enquiry_card(e) for e in enqs)
     lines = [f"• #{e.id} — {e.category} — {e.status} ({e.created_at.strftime('%d %b %Y')})" for e in enqs]
     return "\n".join(lines)
+def resolve_client(session, context):
+    client = None
+
+    if context.get("client_id"):
+        client = Client.query.get(context["client_id"])
+
+    if not client and session.client_id:
+        client = Client.query.get(session.client_id)
+
+    return client
 
 
 @chat_bp.route("/api/clients", methods=["GET"])
@@ -135,6 +145,7 @@ def start_chat():
         "context": {
             "client_id": client_id,
             "client_name": user_name,
+            "email": client.email if client else None
         }
     }), 201
 
@@ -227,11 +238,12 @@ def chat_message():
             return jsonify({"state": "returning", "message": reply, "context": context})
 
         elif intent in ("status_check", "follow_up"):
-            client = Client.query.get(context.get("client_id"))
+            client = resolve_client(session, context)
             detailed = client_enquiry_list(client, detailed=True) if client else "No enquiries found."
             reply = f"Here's the latest on your enquiries:\n\n{detailed}"
             bot_reply(session, reply)
             db.session.commit()
+            print("CONTEXT =", context)
             return jsonify({"state": "returning", "message": reply, "context": context})
 
         elif intent == "new_enquiry":
@@ -330,7 +342,7 @@ def chat_message():
             return jsonify({"state": "describe", "message": reply, "context": context})
 
         if intent in ("status_check", "follow_up"):
-            client = Client.query.get(context.get("client_id"))
+            client = resolve_client(session, context)
             detailed = client_enquiry_list(client, detailed=True) if client else "No enquiries found yet."
             reply = (
                 f"Here's the latest on your enquiries:\n\n{detailed}\n\n"
@@ -368,10 +380,11 @@ def chat_message():
         if answer in ("yes", "y", "correct", "ok", "submit", "yeah", "yep"):
             try:
                 client = None
+                print("CONTEXT:", context)
                 if context.get("email"):
                     client = Client.query.filter_by(email=context.get("email")).first()
                 if not client and context.get("client_id"):
-                    client = Client.query.get(context.get("client_id"))
+                    client = resolve_client(session, context)
                 if not client:
                     import uuid
                     guest_email = context.get("email") or f"guest-{uuid.uuid4().hex[:10]}@no-email.local"
@@ -404,7 +417,7 @@ def chat_message():
                     enquiry_id=enq.id,
                     action=f"Submitted via chatbot. Category: {enq.category}, Priority: {enq.priority}"
                 ))
-
+                db.session.commit()
                 eta = {
                     "High": "within a few hours",
                     "Medium": "within 1–2 business days",
@@ -471,7 +484,7 @@ def chat_message():
 
             # STATUS CHECK / FOLLOW UP
             elif intent in ("status_check", "follow_up"):
-                client = Client.query.get(context.get("client_id"))
+                client = resolve_client(session, context)
                 detailed = (
                     client_enquiry_list(client, detailed=True)
                     if client else

@@ -29,6 +29,7 @@ VALID_INTENTS = [
     "follow_up",
     "services_info",
     "pricing",
+    "cancel"
     "other"
 ]
 
@@ -100,7 +101,7 @@ def _keyword_intent(text):
         return "follow_up"
     if any(w in t for w in ["cost","price","pricing","quote","estimate","budget","how much"]):
         return "pricing"
-    if any(w in t for w in ["need", "want", "looking for", "require", "raise", "new enquiry", "new request", "build", "create", "develop"]):
+    if any(w in t for w in ["need", "want", "looking for", "require", "raise", "new enquiry", "new request", "build", "create", "develop","broken","bug","issue","problem""error","crash","not working","login"]):
         return "new_enquiry"
     return "other"
 
@@ -180,6 +181,7 @@ def detect_intent(text: str) -> dict:
 
 Classify the user message into EXACTLY one intent.
 
+
 Allowed intents:
 new_enquiry
 status_check
@@ -187,6 +189,7 @@ faq
 greeting
 follow_up
 services_info
+pricing
 cancel
 other
 
@@ -201,6 +204,12 @@ Examples:
 "track my enquiry" -> status_check
 "I need a website" -> new_enquiry
 "I need ERP software" -> new_enquiry
+"My website login page is broken" -> new_enquiry
+"My app crashes when I login" -> new_enquiry
+"Payment gateway is not working" -> new_enquiry
+"There is a bug on my website" -> new_enquiry
+"My ERP software has issues" -> new_enquiry
+"My website is down" -> new_enquiry
 "any update on ticket 23" -> follow_up
 "cancel" -> cancel
 "never mind" -> cancel
@@ -244,6 +253,10 @@ Message:
         resp.raise_for_status()
         content = resp.json()["choices"][0]["message"]["content"]
         result = json.loads(content)
+        keyword_intent = _keyword_intent(text)
+
+        if keyword_intent == "new_enquiry" and result.get("intent") in ["follow_up", "other"]:
+            result["intent"] = "new_enquiry"
 
         if result.get("intent") not in VALID_INTENTS:
             result["intent"] = _keyword_intent(text)
