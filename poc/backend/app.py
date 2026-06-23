@@ -2,6 +2,7 @@ import os
 from flask import Flask
 from flask_cors import CORS
 from database import init_db
+from dotenv import load_dotenv
 from routes.enquiries     import enquiries_bp
 from routes.dashboard     import dashboard_bp
 from routes.auth          import auth_bp
@@ -11,6 +12,7 @@ from routes.automation    import automation_bp
 
 
 def create_app():
+    load_dotenv()
     app = Flask(__name__)
 
     BASE_DIR = os.path.abspath(os.path.dirname(__file__))
