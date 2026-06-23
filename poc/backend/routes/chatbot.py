@@ -2,13 +2,13 @@ import re
 from flask import Blueprint, request, jsonify
 from database import db
 from models import Client, Enquiry, ActivityLog, ChatSession, ChatMessage
-# Renamed import to wrap it locally with your print statement
 from services.ai_service import analyse, detect_intent as _detect_intent, generate_chat_reply
 
 chat_bp = Blueprint("chat", __name__)
 
 BOT_NAME = "Eva"
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+NO_RE = re.compile(r"^(no|nope|nah|n)\b[\s,.\-:]*(.*)$", re.IGNORECASE)
 
 QUICK_CANCEL_PHRASES = {
     "cancel", "stop", "nevermind", "never mind", "forget it",
@@ -20,7 +20,6 @@ QUESTION_STARTERS = ("how ", "what ", "why ", "when ", "where ", "who ",
                      "could you", "would you", "will you")
 
 
-# Local wrapper to capture and print the intent right before the return statement
 def detect_intent(user_input):
     result = _detect_intent(user_input)
     print("INTENT DETECTED:", result)
@@ -68,14 +67,22 @@ def client_enquiry_list(client, detailed=False):
         return "\n\n".join(enquiry_card(e) for e in enqs)
     lines = [f"• #{e.id} — {e.category} — {e.status} ({e.created_at.strftime('%d %b %Y')})" for e in enqs]
     return "\n".join(lines)
+
+
 def resolve_client(session, context):
+    """session.client_id is the durable, write-once value set in the DB at chat
+    start — always prefer it over context.client_id, which is just a JSON value
+    bounced between frontend and backend and can drift out of sync."""
     client = None
 
-    if context.get("client_id"):
+    if session.client_id:
+        client = Client.query.get(session.client_id)
+
+    if not client and context.get("client_id"):
         client = Client.query.get(context["client_id"])
 
-    if not client and session.client_id:
-        client = Client.query.get(session.client_id)
+    if not client and context.get("email"):
+        client = Client.query.filter_by(email=context["email"]).first()
 
     return client
 
@@ -127,13 +134,20 @@ def start_chat():
             for e in recent_enquiries:
                 recent += f"• #{e.id} — {e.category} ({e.status})\n"
 
-    greeting = (
-        f"Welcome back, **{user_name}** 👋\n\n"
-        f"I'm **{BOT_NAME}**, your virtual assistant."
-        f"{recent}\n\n"
-        "What would you like to do? Just tell me in your own words — for example "
-        "*\"I need a new website\"* or *\"what's the status of my last request\"*."
-    )
+    if client:
+        greeting = (
+            f"Welcome back, **{user_name}** 👋\n\n"
+            f"I'm **{BOT_NAME}**, your virtual assistant."
+            f"{recent}\n\n"
+            "What would you like to do? Just tell me in your own words — for example "
+            "*\"I need a new website\"* or *\"what's the status of my last request\"*."
+        )
+    else:
+        greeting = (
+            f"Hi {user_name}! 👋 I'm **{BOT_NAME}**, your virtual assistant.\n\n"
+            "I can help you raise a new enquiry, check on an existing one, or answer "
+            "questions about our services. What would you like to do?"
+        )
 
     bot_reply(session, greeting)
     db.session.commit()
@@ -164,14 +178,12 @@ def chat_message():
 
     user_msg(session, user_input)
 
-    # ── Universal cancel — works from any state except the very first email step ──
     if state != "identify" and user_input.lower() in QUICK_CANCEL_PHRASES:
         reply = "No problem — I've cancelled that. What else can I help you with?"
         bot_reply(session, reply)
         db.session.commit()
         return jsonify({"state": "returning", "message": reply, "context": context})
 
-    # ── identify — fallback path if chat was started without a client_id ──
     if state == "identify":
         email = user_input.lower().strip()
 
@@ -211,7 +223,6 @@ def chat_message():
             db.session.commit()
             return jsonify({"state": "new_name", "message": reply, "context": {"email": email}})
 
-    # ── returning — driven by intent detection on free-text input ─────
     elif state == "returning":
         intent = detect_intent(user_input).get("intent", "other")
 
@@ -243,19 +254,20 @@ def chat_message():
             reply = f"Here's the latest on your enquiries:\n\n{detailed}"
             bot_reply(session, reply)
             db.session.commit()
-            print("CONTEXT =", context)
             return jsonify({"state": "returning", "message": reply, "context": context})
 
         elif intent == "new_enquiry":
-            if len(user_input.strip()) >= 8:
+            ai_preview = analyse(user_input)
+            is_specific = len(user_input.strip()) >= 15 and ai_preview["category"] != "General"
+
+            if is_specific:
                 context["description"] = user_input
-                ai = analyse(user_input)
-                context["ai"] = ai
+                context["ai"] = ai_preview
                 reply = (
                     "Thanks, that's really helpful! Here's how I've logged it on our side:\n\n"
-                    f"🏷️ Service area: **{ai['category']}**\n"
-                    f"⚡ Priority: **{ai['priority']}**\n"
-                    f"📝 Summary: {ai['ai_summary']}\n\n"
+                    f"🏷️ Service area: **{ai_preview['category']}**\n"
+                    f"⚡ Priority: **{ai_preview['priority']}**\n"
+                    f"📝 Summary: {ai_preview['ai_summary']}\n\n"
                     "Shall I go ahead and submit this to our team? (**yes** / **no** / **cancel**)"
                 )
                 bot_reply(session, reply)
@@ -280,11 +292,7 @@ def chat_message():
             )
             bot_reply(session, reply)
             db.session.commit()
-            return jsonify({
-                "state": "returning",
-                "message": reply,
-                "context": context
-            })
+            return jsonify({"state": "returning", "message": reply, "context": context})
 
         else:
             reply = generate_chat_reply(user_input)
@@ -292,7 +300,6 @@ def chat_message():
             db.session.commit()
             return jsonify({"state": "returning", "message": reply, "context": context})
 
-    # ── new_name ─────────────────────────────────────────────────────
     elif state == "new_name":
         if len(user_input.strip()) < 2:
             reply = "Could you share your full name? Just so I know who I'm chatting with 🙂"
@@ -306,7 +313,6 @@ def chat_message():
         db.session.commit()
         return jsonify({"state": "new_phone", "message": reply, "context": context})
 
-    # ── new_phone ────────────────────────────────────────────────────
     elif state == "new_phone":
         context["phone"] = "" if user_input.lower() == "skip" else user_input.strip()
         reply = "And which **company** are you with, if any? (type *skip* if it's just you)"
@@ -314,7 +320,6 @@ def chat_message():
         db.session.commit()
         return jsonify({"state": "new_co", "message": reply, "context": context})
 
-    # ── new_co ───────────────────────────────────────────────────────
     elif state == "new_co":
         context["company"] = "" if user_input.lower() == "skip" else user_input.strip()
         reply = (
@@ -327,7 +332,6 @@ def chat_message():
         db.session.commit()
         return jsonify({"state": "describe", "message": reply, "context": context})
 
-    # ── describe — now intent-aware, so questions don't get swallowed ──
     elif state == "describe":
         intent = detect_intent(user_input).get("intent", "other")
         is_question = looks_like_question(user_input)
@@ -358,8 +362,17 @@ def chat_message():
             db.session.commit()
             return jsonify({"state": "describe", "message": reply, "context": context})
 
-        context["description"] = user_input
         ai = analyse(user_input)
+        if ai["category"] == "General" and len(user_input.strip()) < 25:
+            reply = (
+                "Could you give me a bit more detail — for example, what kind of service this "
+                "relates to (website, app, ERP, etc.) and what's going wrong or what you need?"
+            )
+            bot_reply(session, reply)
+            db.session.commit()
+            return jsonify({"state": "describe", "message": reply, "context": context})
+
+        context["description"] = user_input
         context["ai"] = ai
 
         reply = (
@@ -373,18 +386,12 @@ def chat_message():
         db.session.commit()
         return jsonify({"state": "confirm", "message": reply, "context": context})
 
-    # ── confirm — now answers side-questions instead of repeating itself ──
     elif state == "confirm":
         answer = user_input.strip().lower()
 
         if answer in ("yes", "y", "correct", "ok", "submit", "yeah", "yep"):
             try:
-                client = None
-                print("CONTEXT:", context)
-                if context.get("email"):
-                    client = Client.query.filter_by(email=context.get("email")).first()
-                if not client and context.get("client_id"):
-                    client = resolve_client(session, context)
+                client = resolve_client(session, context)
                 if not client:
                     import uuid
                     guest_email = context.get("email") or f"guest-{uuid.uuid4().hex[:10]}@no-email.local"
@@ -417,7 +424,7 @@ def chat_message():
                     enquiry_id=enq.id,
                     action=f"Submitted via chatbot. Category: {enq.category}, Priority: {enq.priority}"
                 ))
-                db.session.commit()
+
                 eta = {
                     "High": "within a few hours",
                     "Medium": "within 1–2 business days",
@@ -430,6 +437,7 @@ def chat_message():
                     "Anything else? Just ask — I'm right here."
                 )
                 bot_reply(session, reply)
+                db.session.commit()
                 return jsonify({
                     "state": "returning", "message": reply,
                     "enquiry_id": enq.id, "client_id": client.id, "context": context
@@ -443,7 +451,25 @@ def chat_message():
                 db.session.commit()
                 return jsonify({"state": "confirm", "message": reply, "context": context})
 
-        elif answer in ("no", "n", "nope"):
+        no_match = NO_RE.match(user_input.strip())
+        if no_match:
+            remainder = no_match.group(2).strip()
+
+            if len(remainder) >= 8:
+                ai = analyse(remainder)
+                context["description"] = remainder
+                context["ai"] = ai
+                reply = (
+                    "No problem, here's the updated version:\n\n"
+                    f"🏷️ Service area: **{ai['category']}**\n"
+                    f"⚡ Priority: **{ai['priority']}**\n"
+                    f"📝 Summary: {ai['ai_summary']}\n\n"
+                    "Shall I go ahead and submit this instead? (**yes** / **no** / **cancel**)"
+                )
+                bot_reply(session, reply)
+                db.session.commit()
+                return jsonify({"state": "confirm", "message": reply, "context": context})
+
             reply = (
                 "No worries — go ahead and describe it again, and I'll re-read it. "
                 "(Or type **cancel** if you'd rather not raise this right now.)"
@@ -452,71 +478,53 @@ def chat_message():
             db.session.commit()
             return jsonify({"state": "describe", "message": reply, "context": context})
 
-        else:
-            intent = detect_intent(user_input).get("intent", "other")
-            is_question = looks_like_question(user_input)
+        intent = detect_intent(user_input).get("intent", "other")
+        is_question = looks_like_question(user_input)
 
-            # FAQ / SERVICES / PRICING
-            if intent in ("faq", "services_info", "pricing") or is_question:
-                if intent == "pricing":
-                    answer_reply = (
-                        "Typical pricing depends on requirements:\n\n"
-                        "🌐 Website: ₹10,000 - ₹50,000+\n\n"
-                        "📱 Mobile App: ₹50,000 - ₹5,00,000+\n\n"
-                        "🏢 ERP / CRM: ₹1,00,000+\n\n"
-                        "The final cost depends on features, integrations, design, and timelines."
-                    )
-                else:
-                    answer_reply = generate_chat_reply(user_input)
-
-                reply = (
-                    f"{answer_reply}\n\n"
-                    "Getting back to it — shall I go ahead and submit your enquiry? "
-                    "(**yes** / **no** / **cancel**)"
+        if intent in ("faq", "services_info", "pricing") or is_question:
+            if intent == "pricing":
+                answer_reply = (
+                    "Typical pricing depends on requirements:\n\n"
+                    "🌐 Website: ₹10,000 - ₹50,000+\n\n"
+                    "📱 Mobile App: ₹50,000 - ₹5,00,000+\n\n"
+                    "🏢 ERP / CRM: ₹1,00,000+\n\n"
+                    "The final cost depends on features, integrations, design, and timelines."
                 )
-                bot_reply(session, reply)
-                db.session.commit()
-                return jsonify({
-                    "state": "confirm",
-                    "message": reply,
-                    "context": context
-                })
+            else:
+                answer_reply = generate_chat_reply(user_input)
 
-            # STATUS CHECK / FOLLOW UP
-            elif intent in ("status_check", "follow_up"):
-                client = resolve_client(session, context)
-                detailed = (
-                    client_enquiry_list(client, detailed=True)
-                    if client else
-                    "No enquiries found."
-                )
-
-                reply = (
-                    f"📋 Here's the latest on your enquiries:\n\n"
-                    f"{detailed}\n\n"
-                    "Getting back to the draft enquiry — should I submit it? "
-                    "(**yes** / **no** / **cancel**)"
-                )
-                bot_reply(session, reply)
-                db.session.commit()
-                return jsonify({
-                    "state": "confirm",
-                    "message": reply,
-                    "context": context
-                })
-
-            # FALLBACK STATIC REPLY
             reply = (
-                "Just to confirm — should I submit this to our team?\n\n"
-                "Reply with **yes**, **no**, or **cancel**."
+                f"{answer_reply}\n\n"
+                "Getting back to it — shall I go ahead and submit your enquiry? "
+                "(**yes** / **no** / **cancel**)"
             )
             bot_reply(session, reply)
             db.session.commit()
-            return jsonify({
-                "state": "confirm",
-                "message": reply,
-                "context": context
-            })
+            return jsonify({"state": "confirm", "message": reply, "context": context})
+
+        elif intent in ("status_check", "follow_up"):
+            client = resolve_client(session, context)
+            detailed = (
+                client_enquiry_list(client, detailed=True)
+                if client else
+                "No enquiries found."
+            )
+            reply = (
+                f"📋 Here's the latest on your enquiries:\n\n"
+                f"{detailed}\n\n"
+                "Getting back to the draft enquiry — should I submit it? "
+                "(**yes** / **no** / **cancel**)"
+            )
+            bot_reply(session, reply)
+            db.session.commit()
+            return jsonify({"state": "confirm", "message": reply, "context": context})
+
+        reply = (
+            "Just to confirm — should I submit this to our team?\n\n"
+            "Reply with **yes**, **no**, or **cancel**."
+        )
+        bot_reply(session, reply)
+        db.session.commit()
+        return jsonify({"state": "confirm", "message": reply, "context": context})
 
     return jsonify({"error": "Unknown state"}), 400
-

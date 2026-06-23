@@ -8,6 +8,7 @@ import EditEnquiry   from './pages/EditEnquiry';
 import ClientChatbot from './pages/ClientChatbot';
 import ClientList    from './pages/ClientList';
 import ClientProfile from './pages/ClientProfile';
+import Automation    from './pages/Automation';
 import API           from './api/axios';
 
 API.interceptors.request.use(cfg => {
@@ -38,14 +39,15 @@ export default function App() {
         <Routes>
           {user.role === 'admin' ? (
             <>
-              <Route path="/"          element={<Navigate to="/dashboard"/>}/>
-              <Route path="/dashboard" element={<Dashboard/>}/>
-              <Route path="/enquiries" element={<EnquiryList/>}/>
-              <Route path="/add"       element={<AddEnquiry/>}/>
-              <Route path="/edit/:id"  element={<EditEnquiry/>}/>
-              <Route path="/clients"   element={<ClientList/>}/>
+              <Route path="/"            element={<Navigate to="/dashboard"/>}/>
+              <Route path="/dashboard"   element={<Dashboard/>}/>
+              <Route path="/enquiries"   element={<EnquiryList/>}/>
+              <Route path="/add"         element={<AddEnquiry/>}/>
+              <Route path="/edit/:id"    element={<EditEnquiry/>}/>
+              <Route path="/clients"     element={<ClientList/>}/>
               <Route path="/clients/:id" element={<ClientProfile/>}/>
-              <Route path="*"          element={<Navigate to="/dashboard"/>}/>
+              <Route path="/automation"  element={<Automation/>}/>
+              <Route path="*"            element={<Navigate to="/dashboard"/>}/>
             </>
           ) : (
             <>
@@ -71,10 +73,11 @@ function AppShell({ user, onLogout, children }) {
 
         {user.role === 'admin' && (
           <div className="navbar-nav d-flex flex-row ms-3 gap-1">
-            <Link className={a('/dashboard')} to="/dashboard">Dashboard</Link>
-            <Link className={a('/enquiries')} to="/enquiries">All Enquiries</Link>
-            <Link className={a('/clients')}   to="/clients">Clients</Link>
-            <Link className={a('/add')}       to="/add">+ New</Link>
+            <Link className={a('/dashboard')}  to="/dashboard">Dashboard</Link>
+            <Link className={a('/enquiries')}  to="/enquiries">All Enquiries</Link>
+            <Link className={a('/clients')}    to="/clients">Clients</Link>
+            <Link className={a('/add')}        to="/add">+ New</Link>
+            <Link className={a('/automation')} to="/automation">📧 Email</Link>
           </div>
         )}
 

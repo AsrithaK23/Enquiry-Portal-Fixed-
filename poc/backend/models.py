@@ -65,6 +65,7 @@ class Enquiry(db.Model):
     status         = db.Column(db.String(50), default="New")
     follow_up_date = db.Column(db.String(20))
     notes          = db.Column(db.Text, default="")
+    inbound_message_id = db.Column(db.String(255), nullable=True)
     created_at     = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at     = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -126,3 +127,20 @@ class ChatMessage(db.Model):
     sender     = db.Column(db.String(10))
     message    = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+class ConversationThread(db.Model):
+    __tablename__ = "conversation_threads"
+
+    id            = db.Column(db.Integer, primary_key=True)
+    client_email  = db.Column(db.String(100), nullable=False)
+    category      = db.Column(db.String(50), nullable=False)
+    contact_count = db.Column(db.Integer, default=1)
+    last_contact_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at    = db.Column(db.DateTime, default=datetime.utcnow)
+class EmailLog(db.Model):
+    __tablename__ = "email_logs"
+
+    id           = db.Column(db.Integer, primary_key=True)
+    sender       = db.Column(db.String(100))
+    subject      = db.Column(db.String(255))
+    enquiry_id   = db.Column(db.Integer, db.ForeignKey("enquiries.id"), nullable=True)
+    created_at   = db.Column(db.DateTime, default=datetime.utcnow)

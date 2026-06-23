@@ -29,7 +29,7 @@ VALID_INTENTS = [
     "follow_up",
     "services_info",
     "pricing",
-    "cancel"
+    "cancel",
     "other"
 ]
 
@@ -101,7 +101,7 @@ def _keyword_intent(text):
         return "follow_up"
     if any(w in t for w in ["cost","price","pricing","quote","estimate","budget","how much"]):
         return "pricing"
-    if any(w in t for w in ["need", "want", "looking for", "require", "raise", "new enquiry", "new request", "build", "create", "develop","broken","bug","issue","problem""error","crash","not working","login"]):
+    if any(w in t for w in ["need", "want", "looking for", "require", "raise", "new enquiry", "new request", "build", "create", "develop","broken","bug","issue","problem","error","crash","not working","login"]):
         return "new_enquiry"
     return "other"
 
@@ -329,3 +329,62 @@ Customer Message:
     except Exception as e:
         print("Support Agent Error:", e)
         return "Sorry, I'm having trouble answering right now."
+
+
+def generate_response(enquiry):
+    fallback = (
+        f"Hi {enquiry.customer_name},\n\n"
+        "Thank you for reaching out. We have received your enquiry and our team "
+        "will review the details shortly. We will get back to you with the next steps.\n\n"
+        "Regards,\nSmart Enquiry Team"
+    )
+
+    if not GROQ_API_KEY:
+        return fallback
+
+    prompt = f"""Write a polite first email reply for this client enquiry.
+Keep it under 90 words. Do not promise pricing or timelines.
+
+Client: {enquiry.customer_name}
+Category: {enquiry.category}
+Priority: {enquiry.priority}
+Summary: {enquiry.ai_summary}
+Original message:
+\"\"\"{enquiry.description}\"\"\"
+"""
+
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.4,
+                "max_tokens": 180,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip() or fallback
+    except Exception as e:
+        print("Reply generation failed:", e)
+        return fallback
+
+
+def classify_and_summarise(text):
+    result = analyse(text)
+
+    class DraftEnquiry:
+        customer_name = "Customer"
+        description = text
+        category = result["category"]
+        priority = result["priority"]
+        ai_summary = result["ai_summary"]
+
+    return {
+        "category": result["category"],
+        "priority": result["priority"],
+        "summary": result["ai_summary"],
+        "suggested_reply": generate_response(DraftEnquiry()),
+    }

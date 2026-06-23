@@ -7,6 +7,8 @@ from routes.dashboard     import dashboard_bp
 from routes.auth          import auth_bp
 from routes.chatbot       import chat_bp
 from routes.email_webhook import email_bp
+from routes.automation    import automation_bp
+
 
 def create_app():
     app = Flask(__name__)
@@ -24,6 +26,7 @@ def create_app():
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(chat_bp)
     app.register_blueprint(email_bp)
+    app.register_blueprint(automation_bp)
 
     @app.route("/")
     def health():

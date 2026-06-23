@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify
 from database import db
 from models import Enquiry
 from datetime import date
+from models import Enquiry, EmailLog 
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
@@ -26,11 +27,22 @@ def dashboard():
     by_priority = db.session.query(Enquiry.priority, db.func.count(Enquiry.id)).group_by(Enquiry.priority).all()
 
     recent = Enquiry.query.order_by(Enquiry.created_at.desc()).limit(5).all()
+    try:
+        from models import EmailLog
+        emails_synced = EmailLog.query.count()
+        emails_today  = EmailLog.query.filter(
+            db.func.date(EmailLog.created_at) == date.today().isoformat()
+        ).count()
+    except Exception:
+        emails_synced = 0
+        emails_today  = 0
 
     return jsonify({
         "total": total, "new": new, "in_discussion": in_disc,
         "quoted": quoted, "closed": closed, "dropped": dropped,
         "pending_followup": pending_followup,
+        "emails_synced": emails_synced,
+        "emails_today": emails_today,
         "by_category": {k: v for k, v in by_category},
         "by_priority": {k: v for k, v in by_priority},
         "recent": [e.to_dict(include_logs=False) for e in recent],
