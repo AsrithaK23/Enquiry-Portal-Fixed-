@@ -66,6 +66,7 @@ class Enquiry(db.Model):
     follow_up_date = db.Column(db.String(20))
     notes          = db.Column(db.Text, default="")
     inbound_message_id = db.Column(db.String(255), nullable=True)
+    inbound_subject = db.Column(db.String(255), nullable=True)
     created_at     = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at     = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
