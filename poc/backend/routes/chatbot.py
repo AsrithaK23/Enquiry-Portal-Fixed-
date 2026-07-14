@@ -121,6 +121,7 @@ def start_chat():
     client = Client.query.get(client_id) if client_id else None
 
     recent = ""
+    recent_enquiries = []
     if client:
         recent_enquiries = (
             Enquiry.query
@@ -134,7 +135,11 @@ def start_chat():
             for e in recent_enquiries:
                 recent += f"• #{e.id} — {e.category} ({e.status})\n"
 
-    if client:
+    # IMPORTANT: a Client row can exist (e.g. auto-created at signup or by an
+    # inbound email) with zero enquiries yet. "Welcome back" should only show
+    # when there's actual history to welcome them back to — otherwise every
+    # brand-new signed-up user gets greeted as a returning customer.
+    if client and recent_enquiries:
         greeting = (
             f"Welcome back, **{user_name}** 👋\n\n"
             f"I'm **{BOT_NAME}**, your virtual assistant."

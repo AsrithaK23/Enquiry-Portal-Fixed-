@@ -67,6 +67,15 @@ class Enquiry(db.Model):
     notes          = db.Column(db.Text, default="")
     inbound_message_id = db.Column(db.String(255), nullable=True)
     inbound_subject = db.Column(db.String(255), nullable=True)
+
+    # Added: required by routes/automation.py (email sync flow) — these
+    # were previously being written to but never defined on the model,
+    # which caused "TypeError: 'automation_state' is an invalid keyword
+    # argument for Enquiry" whenever an email tried to sync.
+    automation_state   = db.Column(db.String(50), nullable=True)      # e.g. "Imported"
+    suggested_response = db.Column(db.Text, nullable=True)            # AI-drafted reply text
+    reply_status        = db.Column(db.String(50), default="pending_manual")  # pending_manual | auto_sent | send_failed
+
     created_at     = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at     = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -86,6 +95,10 @@ class Enquiry(db.Model):
             "status": self.status,
             "follow_up_date": self.follow_up_date or "",
             "notes": self.notes or "",
+            "inbound_subject": self.inbound_subject or "",
+            "automation_state": self.automation_state or "",
+            "suggested_response": self.suggested_response or "",
+            "reply_status": self.reply_status or "pending_manual",
             "created_at": self.created_at.strftime("%Y-%m-%d %H:%M") if self.created_at else "",
             "updated_at": self.updated_at.strftime("%Y-%m-%d %H:%M") if self.updated_at else "",
         }
@@ -128,6 +141,8 @@ class ChatMessage(db.Model):
     sender     = db.Column(db.String(10))
     message    = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class ConversationThread(db.Model):
     __tablename__ = "conversation_threads"
 
@@ -137,6 +152,8 @@ class ConversationThread(db.Model):
     contact_count = db.Column(db.Integer, default=1)
     last_contact_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_at    = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class EmailLog(db.Model):
     __tablename__ = "email_logs"
 

@@ -37,23 +37,31 @@ def register():
     data = request.get_json()
     if not data.get("email") or not data.get("password") or not data.get("name"):
         return jsonify({"error": "name, email and password required"}), 400
-    if User.query.filter_by(email=data["email"]).first():
+
+    # Normalize the same way email-intake does (services/email_service.py /
+    # routes/automation.py both lower-case the sender address before storing
+    # or looking up a Client). Without this, "Test@gmail.com" at signup and
+    # "test@gmail.com" from an inbound email are treated as two different
+    # people, so a new user never sees enquiries that came in by email.
+    email = data["email"].strip().lower()
+
+    if User.query.filter_by(email=email).first():
         return jsonify({"error": "Email already registered"}), 400
 
     role = data.get("role", "client")
     client_id = None
     if role == "client":
-        client = Client.query.filter_by(email=data["email"]).first()
+        client = Client.query.filter_by(email=email).first()
         if not client:
             client = Client(
-                name=data["name"], email=data["email"],
+                name=data["name"], email=email,
                 phone=data.get("phone", ""), company=data.get("company", ""),
             )
             db.session.add(client)
             db.session.flush()
         client_id = client.id
 
-    user = User(name=data["name"], email=data["email"], role=role, client_id=client_id)
+    user = User(name=data["name"], email=email, role=role, client_id=client_id)
     user.set_password(data["password"])
     db.session.add(user)
     db.session.commit()
@@ -65,7 +73,8 @@ def register():
 @auth_bp.route("/api/auth/login", methods=["POST"])
 def login():
     data = request.get_json()
-    user = User.query.filter_by(email=data.get("email")).first()
+    email = (data.get("email") or "").strip().lower()
+    user = User.query.filter_by(email=email).first()
     if not user or not user.check_password(data.get("password", "")):
         return jsonify({"error": "Invalid email or password"}), 401
     token = generate_token(user.id)

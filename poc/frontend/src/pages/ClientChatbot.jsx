@@ -3,6 +3,7 @@ import API from '../api/axios';
 
 const BADGE = { New:'primary','In Discussion':'warning',Quoted:'secondary',Closed:'success',Dropped:'danger' };
 const PRI   = { High:'danger', Medium:'warning', Low:'success' };
+const SUPPORT_EMAIL = 'nas4.crm@gmail.com';
 
 export default function ClientChatbot({ user }) {
   const [messages,  setMessages]  = useState([]);
@@ -273,9 +274,11 @@ async function startChat() {
           <div className="card mt-3">
             <div className="card-header py-2"><strong>✉️ Prefer email?</strong></div>
             <div className="card-body p-2 small text-muted">
-              You can also email us directly — our system automatically reads incoming emails,
-              creates an enquiry on your behalf, and replies with your enquiry ID.
-              Anything you email us will also appear in this list.
+              You can also email us directly at{' '}
+              <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a> — our system
+              automatically reads incoming emails, creates an enquiry on your behalf,
+              and replies with your enquiry ID. Anything you email us will also
+              appear in this list.
             </div>
           </div>
         </div>
