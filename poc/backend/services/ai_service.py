@@ -1,8 +1,8 @@
 """
 AI Service — Smart Client Enquiry Portal
 -----------------------------------------
-Uses Groq's LLM API (free, fast) for real classification + summaries.
-Falls back to keyword-based logic automatically if GROQ_API_KEY is not set,
+Uses Google Gemini API (gemini-1.5-flash) for real classification + summaries.
+Falls back to keyword-based logic automatically if GEMINI_API_KEY is not set,
 or if the API call fails for any reason — so the app never breaks.
 """
 from dotenv import load_dotenv
@@ -10,14 +10,16 @@ from pathlib import Path
 import os
 import re
 import json
-import requests
+import google.generativeai as genai
 
 env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL   = "llama-3.1-8b-instant"   # fast + free tier
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL_NAME = "gemini-1.5-flash"   # fast + free tier
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 VALID_CATEGORIES = [
     "Website", "Web App", "Mobile App", "ERP/CRM", "Support",
@@ -141,9 +143,6 @@ def _contains_any(t, words):
     return any(w in t for w in words)
 
 
-# Common chat shorthand / typos -> normalized words.
-# Applied on whole words only (word-boundary), so it won't mangle
-# unrelated substrings (e.g. "your" won't get double-normalized).
 _SHORTHAND_MAP = {
     "u": "you", "ur": "your", "r": "are", "y": "why",
     "wat": "what", "wht": "what", "wt": "what", "whst": "what",
@@ -216,9 +215,9 @@ def _keyword_intent(text):
 
 
 # ─────────────────────────────────────────────────
-# GROQ LLM ANALYSIS — covers category + priority + summary
+# GEMINI LLM ANALYSIS — covers category + priority + summary
 # ─────────────────────────────────────────────────
-def _groq_analyse(text):
+def _gemini_analyse(text):
     prompt = (
         "You are an assistant for a software company's client enquiry system.\n"
         "Read the enquiry below and respond with ONLY a JSON object — no markdown, no explanation:\n\n"
@@ -232,20 +231,12 @@ def _groq_analyse(text):
         f"Enquiry: {text}"
     )
 
-    resp = requests.post(
-        GROQ_URL,
-        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": GROQ_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=10,
+    model = genai.GenerativeModel(
+        GEMINI_MODEL_NAME,
+        generation_config={"response_mime_type": "application/json", "temperature": 0.3}
     )
-    resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"]
-    result = json.loads(content)
+    response = model.generate_content(prompt)
+    result = json.loads(response.text)
 
     if result.get("category") not in VALID_CATEGORIES:
         result["category"] = classify_category(text)
@@ -263,11 +254,11 @@ def analyse(text: str) -> dict:
     if not text or len(text.strip()) < 3:
         return {"category": "General", "priority": "Low", "ai_summary": ""}
 
-    if GROQ_API_KEY:
+    if GEMINI_API_KEY:
         try:
-            return _groq_analyse(text)
+            return _gemini_analyse(text)
         except Exception as e:
-            print(f"⚠️  Groq API failed ({e}), using keyword fallback.")
+            print(f"⚠️  Gemini API failed ({e}), using keyword fallback.")
 
     return _keyword_analyse(text)
 
@@ -278,13 +269,13 @@ def analyse(text: str) -> dict:
 def detect_intent(text: str) -> dict:
     """
     Classifies free-text chat input into one of VALID_INTENTS.
-    Uses Groq if available, else falls back to keyword matching
+    Uses Gemini if available, else falls back to keyword matching
     so the chatbot still works without an API key.
     """
     if not text or len(text.strip()) < 2:
         return {"intent": "other"}
 
-    if not GROQ_API_KEY:
+    if not GEMINI_API_KEY:
         return {"intent": _keyword_intent(text)}
 
     prompt = f"""You are an intent classification engine.
@@ -359,20 +350,12 @@ Message:
 """
 
     try:
-        resp = requests.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": GROQ_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0,
-                "response_format": {"type": "json_object"},
-            },
-            timeout=10,
+        model = genai.GenerativeModel(
+            GEMINI_MODEL_NAME,
+            generation_config={"response_mime_type": "application/json", "temperature": 0}
         )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        result = json.loads(content)
+        response = model.generate_content(prompt)
+        result = json.loads(response.text)
         keyword_intent = _keyword_intent(text)
 
         # Problem-language should always win over a vague follow_up/other guess
@@ -400,7 +383,7 @@ def generate_chat_reply(message: str, intent: str = None) -> str:
     `intent` can be passed in if already known (e.g. from detect_intent),
     otherwise it's computed here. Canned replies handle the "small talk"
     style intents instantly (fast + consistent); everything else that
-    needs real language goes to Groq if available.
+    needs real language goes to Gemini if available.
     """
     if intent is None:
         intent = detect_intent(message).get("intent", "other")
@@ -419,9 +402,9 @@ def generate_chat_reply(message: str, intent: str = None) -> str:
         return "You're welcome!\nFeel free to ask if you need anything else."
 
     if intent == "pricing":
-        if not GROQ_API_KEY:
+        if not GEMINI_API_KEY:
             return PRICING_TEXT
-        # let Groq phrase it, but ground it with the same numbers
+        
         base_prompt = (
             "Rephrase the following pricing information in a friendly, professional, "
             "concise way (max 80 words). Keep all the numbers exactly as given. "
@@ -429,24 +412,17 @@ def generate_chat_reply(message: str, intent: str = None) -> str:
             f"{PRICING_TEXT}\n\nCustomer question: {message}"
         )
         try:
-            resp = requests.post(
-                GROQ_URL,
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": GROQ_MODEL,
-                    "messages": [{"role": "user", "content": base_prompt}],
-                    "temperature": 0.4,
-                    "max_tokens": 200,
-                },
-                timeout=10,
+            model = genai.GenerativeModel(
+                GEMINI_MODEL_NAME,
+                generation_config={"temperature": 0.4, "max_output_tokens": 200}
             )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip() or PRICING_TEXT
+            response = model.generate_content(base_prompt)
+            return response.text.strip() or PRICING_TEXT
         except Exception as e:
             print("Pricing reply generation failed:", e)
             return PRICING_TEXT
 
-    if not GROQ_API_KEY:
+    if not GEMINI_API_KEY:
         if intent in ("faq", "services_info"):
             return (
                 "I'm Eva, the Enquiry Portal assistant. "
@@ -484,19 +460,12 @@ Customer Message:
 """
 
     try:
-        resp = requests.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": GROQ_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7,
-                "max_tokens": 200,
-            },
-            timeout=10,
+        model = genai.GenerativeModel(
+            GEMINI_MODEL_NAME,
+            generation_config={"temperature": 0.7, "max_output_tokens": 200}
         )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip() or FALLBACK_UNKNOWN_TEXT
+        response = model.generate_content(prompt)
+        return response.text.strip() or FALLBACK_UNKNOWN_TEXT
     except Exception as e:
         print("Support Agent Error:", e)
         return "Sorry, I'm having trouble answering right now."
@@ -561,7 +530,7 @@ def generate_response(enquiry):
         "Regards,\nSmart Enquiry Team"
     )
 
-    if not GROQ_API_KEY:
+    if not GEMINI_API_KEY:
         return fallback
 
     prompt = f"""Write a polite, professional first email reply for this client enquiry.
@@ -594,19 +563,12 @@ Original message:
 """
 
     try:
-        resp = requests.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": GROQ_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.4,
-                "max_tokens": 200,
-            },
-            timeout=10,
+        model = genai.GenerativeModel(
+            GEMINI_MODEL_NAME,
+            generation_config={"temperature": 0.4, "max_output_tokens": 200}
         )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip() or fallback
+        response = model.generate_content(prompt)
+        return response.text.strip() or fallback
     except Exception as e:
         print("Reply generation failed:", e)
         return fallback
