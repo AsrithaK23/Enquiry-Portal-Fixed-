@@ -1,46 +1,38 @@
 from flask import Blueprint, request, jsonify
 from database import db
-from models import Client, Enquiry, ActivityLog
-from services.ai_service import analyse
+from models import Client, Enquiry, ActivityLog, EmailLog
+from datetime import datetime
+import re
+from services.ai_service import analyse, generate_followup_draft
 from services.email_service import fetch_unread_emails, send_reply, missing_mail_settings
+from services.thread_service import check_and_register_thread
 
 email_bp = Blueprint("email_webhook", __name__)
 
 
-def build_reply(client_name, enquiry_id, category, priority):
+def build_reply(client_name, enquiry_id, summary):
+    id_line = f"Enquiry ID: #{enquiry_id}\n\n" if enquiry_id else ""
     return f"""Dear {client_name},
 
-Thank you for reaching out to us.
+Thank you for contacting us.
 
-We have received your enquiry and our team will get back to you shortly.
+We have received your enquiry regarding: {summary}
 
-Reference information:
-  Enquiry ID : #{enquiry_id}
-  Category   : {category}
-  Priority   : {priority}
-
-If you need to follow up, please quote Enquiry #{enquiry_id} in your reply.
+{id_line}Our team will reach back shortly to assist you.
 
 Best regards,
-Enquiry Portal Team
+Smart Enquiry Team
 """
 
 
-def create_enquiry_from_email(from_email: str, from_name: str, subject: str, body: str, source="Email"):
-    """
-    Shared logic: given raw email fields, finds/creates the client,
-    runs AI classification, creates the Enquiry + ActivityLog, and
-    returns (enquiry, client, is_new_client, reply_text).
-
-    Used by BOTH the inbound webhook route and the IMAP inbox-poll route,
-    so email creation behaves identically no matter which path mail comes in from.
-    """
+def create_enquiry_from_email(from_email: str, from_name: str, subject: str, body: str,
+                              source="Email", message_id=None, thread_key=None):
     from_email = (from_email or "").strip().lower()
-    from_name = (from_name or "Unknown Sender").strip()
+    from_name = (from_name or "Customer").strip()
     subject = (subject or "").strip()
     body = (body or "").strip()
 
-    full_text = f"{subject}. {body}" if subject else body
+    full_text = f"Subject: {subject}\n\n{body}" if subject else body
     ai = analyse(full_text)
 
     client = Client.query.filter_by(email=from_email).first()
@@ -57,6 +49,9 @@ def create_enquiry_from_email(from_email: str, from_name: str, subject: str, bod
         source=source, description=body,
         category=ai["category"], priority=ai["priority"],
         ai_summary=ai["ai_summary"], status="New",
+        inbound_subject=subject,
+        inbound_message_id=message_id,
+        thread_key=thread_key,
     )
     db.session.add(enq)
     db.session.flush()
@@ -65,55 +60,102 @@ def create_enquiry_from_email(from_email: str, from_name: str, subject: str, bod
         action=f"Enquiry auto-created from {source.lower()}. {'New client.' if is_new else 'Existing client.'} "
                f"Category: {enq.category}, Priority: {enq.priority}"
     ))
+    reply_text = build_reply(client.name, enq.id, enq.ai_summary)
+    enq.suggested_response = reply_text
+    enq.reply_status = "pending_manual"
     db.session.commit()
-
-    reply_text = build_reply(client.name, enq.id, enq.category, enq.priority)
     return enq, client, is_new, reply_text
 
 
 @email_bp.route("/api/webhook/email", methods=["POST"])
 def receive_email():
-    """
-    For EXTERNAL push sources (SendGrid inbound parse, Zapier, etc.)
-    that POST already-parsed email JSON to this endpoint.
-    This does NOT read your own mailbox — see /api/email/check-inbox for that.
-    """
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON body"}), 400
 
     from_email = (data.get("from_email") or "").strip().lower()
-    from_name  = (data.get("from_name")  or "Unknown Sender").strip()
+    from_name  = (data.get("from_name")  or "Customer").strip()
     subject    = (data.get("subject")    or "").strip()
     body       = (data.get("body")       or "").strip()
+    message_id = (data.get("message_id") or "").strip()
+    in_reply_to = (data.get("in_reply_to") or "").strip()
+    references = (data.get("references") or "").strip()
 
     if not from_email or not body:
         return jsonify({"error": "from_email and body are required"}), 400
 
-    enq, client, is_new, reply_text = create_enquiry_from_email(from_email, from_name, subject, body, source="Email")
+    is_new_thread, thread_key, existing_enquiry = check_and_register_thread(
+        client_email=from_email,
+        category="General",
+        message_id=message_id,
+        in_reply_to=in_reply_to,
+        references=references,
+        subject=subject,
+        body=body,
+    )
 
-    return jsonify({
-        "success": True, "enquiry_id": enq.id, "client_id": client.id,
-        "is_new_client": is_new, "category": enq.category, "priority": enq.priority,
-        "reply_to": from_email, "reply_subject": f"Re: {subject} [Enquiry #{enq.id}]",
-        "reply_body": reply_text,
-    }), 200
+    if is_new_thread or not existing_enquiry:
+        enq, client, is_new, reply_text = create_enquiry_from_email(
+            from_email, from_name, subject, body,
+            source="Email", message_id=message_id, thread_key=thread_key
+        )
+        if message_id:
+            db.session.add(EmailLog(
+                sender=from_email,
+                subject=subject,
+                message_id=message_id,
+                enquiry_id=enq.id
+            ))
+            db.session.commit()
+
+        return jsonify({
+            "success": True, "enquiry_id": enq.id, "client_id": client.id,
+            "is_new_client": is_new, "is_new_thread": True,
+            "category": enq.category, "priority": enq.priority,
+            "reply_to": from_email, "reply_subject": f"Re: {subject} [Enquiry #{enq.id}]",
+            "reply_body": reply_text,
+            "auto_reply_sent": False
+        }), 200
+    else:
+        # Existing thread - DO NOT create duplicate enquiry
+        clean_body = re.sub(r"(?m)^[ \t]*>[^\r\n]*[\r\n]?", "", body or "")
+        clean_body = re.sub(r"(?is)\nOn .*?wrote:\s*.*$", "", clean_body).strip() or body.strip()
+
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+        existing_enquiry.description = (existing_enquiry.description or "").strip() + f"\n\n--- Customer Follow-up ({timestamp}) ---\n{clean_body}"
+        existing_enquiry.updated_at = datetime.utcnow()
+        if existing_enquiry.status in ("New", "Resolved", "Closed"):
+            existing_enquiry.status = "In Discussion"
+
+        followup_draft = generate_followup_draft(existing_enquiry, from_name, body)
+        existing_enquiry.suggested_response = followup_draft
+        existing_enquiry.reply_status = "pending_manual"
+
+        db.session.add(ActivityLog(
+            enquiry_id=existing_enquiry.id,
+            action=f"Follow-up email received: '{clean_body[:80]}' — auto-reply skipped, draft queued for manual review"
+        ))
+        if message_id:
+            db.session.add(EmailLog(
+                sender=from_email,
+                subject=subject,
+                message_id=message_id,
+                enquiry_id=existing_enquiry.id
+            ))
+        db.session.commit()
+
+        return jsonify({
+            "success": True, "enquiry_id": existing_enquiry.id, "client_id": existing_enquiry.client_id,
+            "is_new_client": False, "is_new_thread": False, "is_followup": True,
+            "category": existing_enquiry.category, "priority": existing_enquiry.priority,
+            "reply_to": from_email, "reply_subject": f"Re: {subject} [Enquiry #{existing_enquiry.id}]",
+            "reply_body": followup_draft,
+            "auto_reply_sent": False
+        }), 200
 
 
 @email_bp.route("/api/email/check-inbox", methods=["POST", "GET"])
 def check_inbox():
-    """
-    THIS is the piece that was missing: actually connects to your IMAP
-    mailbox (via services/email_service.fetch_unread_emails), creates an
-    Enquiry for every unread email found, and optionally sends the
-    auto-reply back.
-
-    Call this:
-      - manually (a "Check emails now" button in the dashboard hitting
-        POST /api/email/check-inbox), or
-      - on a schedule (a cron job / Windows Task Scheduler / hosting
-        provider's scheduled task hitting this URL every few minutes).
-    """
     missing = missing_mail_settings()
     if missing:
         return jsonify({
@@ -124,38 +166,116 @@ def check_inbox():
     try:
         emails = fetch_unread_emails(limit=10, mark_seen=True)
     except Exception as e:
-        # Almost always: wrong host, wrong password (needs a Gmail App
-        # Password, not your normal password), or IMAP not enabled on the account.
         return jsonify({"error": f"Could not connect to mailbox: {e}"}), 502
 
     created = []
     for msg in emails:
-        enq, client, is_new, reply_text = create_enquiry_from_email(
-            from_email=msg["sender_email"],
-            from_name=msg["sender_name"],
-            subject=msg["subject"],
-            body=msg["body"],
-            source="Email",
+        message_id = msg.get("message_id", "")
+        if message_id:
+            exists = Enquiry.query.filter_by(inbound_message_id=message_id).first()
+            if not exists:
+                exists = EmailLog.query.filter_by(message_id=message_id).first()
+            if exists:
+                continue
+
+        is_new_thread, thread_key, existing_enquiry = check_and_register_thread(
+            client_email=msg["sender_email"],
+            category="General",
+            message_id=message_id,
+            in_reply_to=msg.get("in_reply_to", ""),
+            references=msg.get("references", ""),
+            subject=msg.get("subject", ""),
+            body=msg.get("body", ""),
         )
 
-        send_result = send_reply(
-            to_email=msg["sender_email"],
-            subject=msg["subject"],
-            body=reply_text,
-        )
+        if is_new_thread or not existing_enquiry:
+            enq, client, is_new, reply_text = create_enquiry_from_email(
+                from_email=msg["sender_email"],
+                from_name=msg["sender_name"],
+                subject=msg["subject"],
+                body=msg["body"],
+                source="Email",
+                message_id=message_id,
+                thread_key=thread_key,
+            )
+            if message_id:
+                db.session.add(EmailLog(
+                    sender=msg["sender_email"],
+                    subject=msg["subject"],
+                    message_id=message_id,
+                    enquiry_id=enq.id
+                ))
 
-        created.append({
-            "enquiry_id": enq.id,
-            "from": msg["sender_email"],
-            "subject": msg["subject"],
-            "is_new_client": is_new,
-            "reply_sent": send_result.get("sent", False),
-            "reply_error": send_result.get("error"),
-        })
+            # Auto-reply ONLY to new threads
+            send_result = send_reply(
+                to_email=msg["sender_email"],
+                subject=msg["subject"],
+                body=reply_text,
+                in_reply_to=message_id,
+                references=msg.get("references", ""),
+            )
+            enq.reply_status = "auto_sent" if send_result.get("sent") else "send_failed"
+            if send_result.get("sent") and send_result.get("message_id"):
+                db.session.add(EmailLog(
+                    sender="CRM",
+                    subject=f"Re: {msg['subject']}",
+                    message_id=send_result.get("message_id"),
+                    enquiry_id=enq.id
+                ))
+            db.session.commit()
+
+            created.append({
+                "enquiry_id": enq.id,
+                "from": msg["sender_email"],
+                "subject": msg["subject"],
+                "is_new_client": is_new,
+                "is_new_thread": True,
+                "reply_sent": send_result.get("sent", False),
+                "reply_error": send_result.get("error"),
+            })
+        else:
+            # Ongoing thread follow-up: DO NOT CREATE ENQUIRY!
+            enq = existing_enquiry
+            clean_body = re.sub(r"(?m)^[ \t]*>[^\r\n]*[\r\n]?", "", msg["body"] or "")
+            clean_body = re.sub(r"(?is)\nOn .*?wrote:\s*.*$", "", clean_body).strip() or msg["body"].strip()
+
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+            enq.description = (enq.description or "").strip() + f"\n\n--- Customer Follow-up ({timestamp}) ---\n{clean_body}"
+            enq.updated_at = datetime.utcnow()
+            if enq.status in ("New", "Resolved", "Closed"):
+                enq.status = "In Discussion"
+
+            followup_draft = generate_followup_draft(enq, msg["sender_name"], msg["body"])
+            enq.suggested_response = followup_draft
+            enq.reply_status = "pending_manual"
+
+            db.session.add(ActivityLog(
+                enquiry_id=enq.id,
+                action=f"Follow-up email received: '{clean_body[:80]}' — auto-reply skipped, draft queued for manual review"
+            ))
+            if message_id:
+                db.session.add(EmailLog(
+                    sender=msg["sender_email"],
+                    subject=msg["subject"],
+                    message_id=message_id,
+                    enquiry_id=enq.id
+                ))
+            db.session.commit()
+
+            created.append({
+                "enquiry_id": enq.id,
+                "from": msg["sender_email"],
+                "subject": msg["subject"],
+                "is_new_client": False,
+                "is_new_thread": False,
+                "is_followup": True,
+                "reply_sent": False,
+                "reply_error": "Follow-up queued for manual review",
+            })
 
     return jsonify({
         "success": True,
         "checked": len(emails),
-        "enquiries_created": len(created),
+        "enquiries_created": len([c for c in created if c.get("is_new_thread")]),
         "details": created,
     }), 200

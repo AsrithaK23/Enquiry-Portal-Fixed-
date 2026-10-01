@@ -37,10 +37,10 @@ export default function ClientProfile() {
 
   let behaviourTag = 'Regular client';
   let behaviourColor = 'secondary';
-  if (highCount >= 2)          { behaviourTag = '🔥 Frequently urgent';    behaviourColor = 'danger';  }
-  else if (dropped > total/2)  { behaviourTag = '⚠️ High drop rate';       behaviourColor = 'warning'; }
-  else if (conversionRate > 60){ behaviourTag = '✅ High conversion';      behaviourColor = 'success'; }
-  else if (total >= 5)         { behaviourTag = '⭐ Frequent client';      behaviourColor = 'primary'; }
+  if (highCount >= 2)          { behaviourTag = 'Frequently urgent';    behaviourColor = 'danger';  }
+  else if (dropped > total/2)  { behaviourTag = 'High drop rate';       behaviourColor = 'warning'; }
+  else if (conversionRate > 60){ behaviourTag = 'High conversion';      behaviourColor = 'success'; }
+  else if (total >= 5)         { behaviourTag = 'Frequent client';      behaviourColor = 'primary'; }
 
   return (
     <div>

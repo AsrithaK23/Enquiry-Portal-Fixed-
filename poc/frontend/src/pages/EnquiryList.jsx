@@ -45,7 +45,7 @@ export default function EnquiryList() {
 
       <div className="row g-2 mb-3">
         <div className="col-md-4">
-          <input className="form-control form-control-sm" placeholder="Search by name or email..."
+          <input className="form-control form-control-sm" placeholder="Search by name, email, or enquiry #..."
             value={search} onChange={e => setSearch(e.target.value)}/>
         </div>
         <div className="col-md-3">
@@ -73,18 +73,32 @@ export default function EnquiryList() {
           <table className="table table-sm table-bordered table-hover">
             <thead className="table-dark">
               <tr>
-                <th>#</th><th>Name</th><th>Phone</th><th>Source</th>
-                <th>Category</th><th>Priority</th><th>🤖 AI Summary</th>
-                <th>Status</th><th>Follow-up</th><th>Created</th><th>Actions</th>
+                <th>#</th>
+                <th>Enquiry #</th>
+                <th>Name</th>
+                <th>Phone</th>
+                <th>Source</th>
+                <th>Category</th>
+                <th>Priority</th>
+                <th>🤖 AI Summary</th>
+                <th>Status</th>
+                <th>Follow-up</th>
+                <th>Created</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {enquiries.length === 0 && (
-                <tr><td colSpan="11" className="text-center text-muted py-3">No records found.</td></tr>
+                <tr><td colSpan="12" className="text-center text-muted py-3">No records found.</td></tr>
               )}
               {enquiries.map((e, i) => (
                 <tr key={e.id}>
-                  <td>{i + 1}</td>
+                  <td className="text-muted small">{i + 1}</td>
+                  <td>
+                    <span className="badge bg-secondary font-monospace" style={{ fontSize: '0.85rem' }}>
+                      #{e.id}
+                    </span>
+                  </td>
                   <td>
                     <strong>{e.customer_name}</strong>
                     <div className="small text-muted">{e.email}</div>

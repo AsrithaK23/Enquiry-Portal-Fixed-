@@ -66,6 +66,7 @@ class Enquiry(db.Model):
     follow_up_date = db.Column(db.String(20))
     notes          = db.Column(db.Text, default="")
     inbound_message_id = db.Column(db.String(255), nullable=True)
+    thread_key       = db.Column(db.String(255), nullable=True)
     inbound_subject = db.Column(db.String(255), nullable=True)
 
     # Added: required by routes/automation.py (email sync flow) — these
@@ -149,6 +150,7 @@ class ConversationThread(db.Model):
     id            = db.Column(db.Integer, primary_key=True)
     client_email  = db.Column(db.String(100), nullable=False)
     category      = db.Column(db.String(50), nullable=False)
+    thread_key    = db.Column(db.String(255), nullable=True)
     contact_count = db.Column(db.Integer, default=1)
     last_contact_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_at    = db.Column(db.DateTime, default=datetime.utcnow)
@@ -160,5 +162,6 @@ class EmailLog(db.Model):
     id           = db.Column(db.Integer, primary_key=True)
     sender       = db.Column(db.String(100))
     subject      = db.Column(db.String(255))
+    message_id   = db.Column(db.String(255), nullable=True)
     enquiry_id   = db.Column(db.Integer, db.ForeignKey("enquiries.id"), nullable=True)
     created_at   = db.Column(db.DateTime, default=datetime.utcnow)

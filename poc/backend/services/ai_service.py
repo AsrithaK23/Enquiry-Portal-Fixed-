@@ -1,8 +1,8 @@
 """
 AI Service — Smart Client Enquiry Portal
 -----------------------------------------
-Uses Google Gemini API (gemini-1.5-flash) for real classification + summaries.
-Falls back to keyword-based logic automatically if GEMINI_API_KEY is not set,
+Uses Groq API (openai/gpt-oss-120b, openai/gpt-oss-20b, qwen/qwen3.8-27b) for real classification + summaries.
+Falls back to keyword-based logic automatically if GROQ_API_KEY is not set,
 or if the API call fails for any reason — so the app never breaks.
 """
 from dotenv import load_dotenv
@@ -10,16 +10,62 @@ from pathlib import Path
 import os
 import re
 import json
-import google.generativeai as genai
+from groq import Groq
 
 env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL_NAME = "gemini-1.5-flash"   # fast + free tier
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+PRIMARY_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+CANDIDATE_MODELS = [
+    PRIMARY_MODEL,
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
+]
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+_groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+
+def _generate_with_groq(prompt: str = None, messages: list = None, json_mode: bool = False, temperature: float = 0.2, max_tokens: int = 500) -> str:
+    """
+    Calls Groq chat completion API with automatic candidate model fallback.
+    Supports json_mode=True (response_format={'type': 'json_object'}).
+    Supports either prompt string or full messages list.
+    """
+    if not _groq_client:
+        raise RuntimeError("GROQ_API_KEY is not configured.")
+
+    if not messages:
+        messages = [{"role": "user", "content": prompt or ""}]
+
+    last_err = None
+    seen = set()
+    for model_name in CANDIDATE_MODELS:
+        if not model_name or model_name in seen:
+            continue
+        seen.add(model_name)
+        try:
+            kwargs = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+
+            response = _groq_client.chat.completions.create(**kwargs)
+            if response and response.choices:
+                content = response.choices[0].message.content or ""
+                return content.strip()
+        except Exception as e:
+            last_err = e
+            continue
+
+    if last_err:
+        raise last_err
+    raise RuntimeError("No Groq models responded successfully.")
 
 VALID_CATEGORIES = [
     "Website", "Web App", "Mobile App", "ERP/CRM", "Support",
@@ -30,6 +76,7 @@ VALID_PRIORITIES = ["High", "Medium", "Low"]
 VALID_INTENTS = [
     "new_enquiry",
     "status_check",
+    "edit_delete_query",
     "faq",
     "greeting",
     "small_talk",
@@ -41,6 +88,137 @@ VALID_INTENTS = [
     "cancel",
     "other",
 ]
+
+SUPPORT_CONTACT_MSG = "To edit or delete an existing enquiry, please reach out to : nas4.crm@gmail.com and our team will be happy to assist you."
+
+LOREM_IPSUM_WORDS = {
+    "lorem", "ipsum", "dolor", "sit", "amet", "consectetur", "adipiscing", "elit",
+    "sed", "eiusmod", "tempor", "incididunt", "labore", "dolore", "magna", "aliqua",
+    "enim", "minim", "veniam", "quis", "nostrud", "exercitation", "ullamco", "laboris",
+    "nisi", "aliquip", "commodo", "consequat", "duis", "aute", "irure", "reprehenderit",
+    "voluptate", "velit", "cillum", "fugiat", "nulla", "pariatur", "excepteur", "sint",
+    "occaecat", "cupidatat", "non", "proident", "sunt", "culpa", "officia", "deserunt",
+    "mollit", "anim", "id", "est", "laborum"
+}
+
+PLACEHOLDER_PHRASES = [
+    "dummy text", "sample text", "placeholder text", "test enquiry",
+    "test message", "random text", "testing 123", "just testing",
+    "asdf asdf", "qwerty qwerty", "foo bar", "foobar", "blah blah",
+    "nothing much", "test test", "sample enquiry", "asdfghjkl", "qwertyuiop"
+]
+
+
+def is_start_enquiry_phrase(text: str) -> bool:
+    """
+    Checks if the user's message is an expression of wanting to start or raise
+    a new enquiry/ticket (e.g. clicking 'Raise a new enquiry', typing 'I want to raise a new enquiry',
+    'raise enquiry', 'can I raise a ticket', 'new enquiry').
+    """
+    if not text:
+        return False
+    t = normalize_text(text).strip().lower()
+    t_clean = re.sub(r"[^\w\s]", "", t).strip()
+
+    exact_matches = {
+        "raise a new enquiry", "raise a enquiry", "raise an enquiry",
+        "raise new enquiry", "raise enquiry", "new enquiry", "create enquiry",
+        "i want to raise a new enquiry", "i want to raise an enquiry",
+        "i want to raise a enquiry", "i want to raise new enquiry",
+        "i want to raise enquiry", "i want to create an enquiry",
+        "i want to create a new enquiry", "i want to submit an enquiry",
+        "i want to submit a new enquiry", "i would like to raise an enquiry",
+        "i would like to raise a new enquiry", "i want to make an enquiry",
+        "i have an enquiry", "i have a new enquiry", "i have a query",
+        "start an enquiry", "start new enquiry", "submit an enquiry",
+        "can i raise an enquiry", "can i raise a new enquiry",
+        "can i submit an enquiry", "how can i raise an enquiry",
+        "raise a query", "raise query", "new query",
+    }
+    if t_clean in exact_matches:
+        return True
+
+    patterns = [
+        r"^(?:i\s+(?:want|need|would\s+like)\s+to\s+)?(?:raise|create|submit|make|start|open|post|log)\s+(?:a\s+|an\s+)?(?:new\s+)?(?:enquiry|inquiry|query|ticket|request)(?:\s+please)?$",
+        r"^(?:raise|new|create|open|start)\s+(?:an?\s+)?(?:enquiry|inquiry|query|ticket|request)$",
+        r"^(?:can|could)\s+i\s+(?:raise|create|submit|make|open)\s+(?:an?\s+)?(?:new\s+)?(?:enquiry|inquiry|query|ticket|request)(?:\s+here)?$",
+        r"^(?:i\s+have|got)\s+(?:an?\s+)?(?:new\s+)?(?:enquiry|inquiry|query|question|ticket|request)$",
+    ]
+    for p in patterns:
+        if re.match(p, t_clean):
+            return True
+
+    return False
+
+
+def is_edit_delete_request(text: str) -> bool:
+    """
+    Detects if the user is asking to edit, update, modify, cancel, or delete an enquiry/query.
+    """
+    t = (text or "").lower().strip()
+    if re.search(r"\b(edit|modify|update|change|delete|remove|cancel|drop|withdraw)\b.*\b(enquiry|enquiries|query|queries|ticket|tickets|request|requests)\b", t):
+        return True
+    if re.search(r"\b(delete|edit|modify|remove)\b\s*#?\d+", t):
+        return True
+    if any(p in t for p in [
+        "edit query", "delete query", "edit enquiry", "delete enquiry",
+        "edit ticket", "delete ticket", "cancel query", "cancel my query",
+        "edit my query", "delete my query", "change my query", "modify query",
+        "how to edit", "how to delete", "how can i edit", "how can i delete",
+        "want to delete", "want to edit", "need to delete", "need to edit",
+    ]):
+        return True
+    return False
+
+
+def validate_enquiry_legitimacy(text: str) -> tuple[bool, str]:
+    """
+    Validates whether enquiry details are genuine requirements vs.
+    lorem ipsum, keysmash, placeholder, or gibberish.
+    Returns (is_legitimate: bool, reason: str).
+    """
+    if not text:
+        return False, "Enquiry description cannot be empty."
+
+    raw = text.strip()
+    if len(raw) < 8:
+        return False, "Enquiry description is too brief. Please provide a few more details."
+
+    lower = raw.lower()
+
+    # 1. Direct Lorem Ipsum phrase check
+    if "lorem ipsum" in lower:
+        return False, "Contains placeholder Lorem Ipsum text."
+
+    # 2. Tokenize words
+    words = re.findall(r"\b[a-z]{2,}\b", lower)
+    if not words or len(words) < 2:
+        return False, "Please provide a complete description with real words."
+
+    # 3. Check for multiple Lorem Ipsum vocabulary words
+    lorem_count = sum(1 for w in words if w in LOREM_IPSUM_WORDS)
+    if lorem_count >= 3 or (len(words) >= 4 and (lorem_count / len(words)) >= 0.4):
+        return False, "Contains placeholder Lorem Ipsum text."
+
+    # 4. Known placeholder phrases (exact or short dummy input)
+    clean_punct = re.sub(r"[^\w\s]", "", lower).strip()
+    for phrase in PLACEHOLDER_PHRASES:
+        if clean_punct == phrase or (len(words) <= 5 and re.search(rf"\b{re.escape(phrase)}\b", lower)):
+            return False, f"Contains placeholder phrase '{phrase}'."
+
+    # 5. Excessive repeated characters (e.g. aaaaa, zzzzz)
+    if re.search(r"(.)\1{4,}", lower):
+        return False, "Contains repetitive keyboard characters."
+
+    # 6. Unbroken consonant clusters of 7+ letters (gibberish/keysmash like asdfghjkl, zxcvbnm, jvjldvblhdbv)
+    if re.search(r"\b[bcdfghjklmnpqrstvwxz]{7,}\b", lower):
+        return False, "Contains unrecognizable keyboard smash words."
+
+    # 7. Repetitive single word spam (e.g., test test test test)
+    if len(words) >= 4 and len(set(words)) <= 2:
+        return False, "Contains repetitive filler words."
+
+    return True, ""
 
 # ─────────────────────────────────────────────────
 # KEYWORD FALLBACK (used if no API key / API fails)
@@ -64,8 +242,48 @@ HIGH_KEYWORDS = [
     r"\burgent\b", r"\basap\b", r"\bimmediately\b", r"\bcritical\b", r"\btoday\b", r"\bemergency\b",
     r"\bproduction\b", r"server down", r"website down", r"payment failed",
     r"customers cannot login", r"customers can't login", r"business stopped",
+    r"\bdown\b", r"\bcrash\b", r"\bcrashed\b", r"\bdata loss\b", r"\bsecurity\b",
 ]
-MEDIUM_KEYWORDS = [r"this week", r"\bsoon\b", r"\bpriority\b", r"\bimportant\b", r"\bquickly\b"]
+MEDIUM_KEYWORDS = [r"this week", r"\bsoon\b", r"\bpriority\b", r"\bimportant\b", r"\bquickly\b", r"\bdeadline\b"]
+LOW_PRIORITY_PATTERNS = [
+    r"\bquote\b", r"\bpricing\b", r"\bestimate\b", r"\bhow much\b", r"\bcost\b",
+    r"\bportfolio\b", r"\bbasic\b", r"\bsimple\b", r"\bsmall\b", r"\bhobby\b",
+    r"\blanding page\b", r"\bblog\b", r"\bfuture\b", r"\bnext year\b", r"\bsometime\b",
+    r"\bno rush\b", r"\bwhenever\b", r"\bexplor(e|ing)\b", r"\bjust wondering\b",
+    r"\bquestion\b", r"\bbrochure\b", r"\btypo\b", r"\bminor\b", r"\bcosmetic\b",
+    r"\blocal bakery\b", r"\blocal shop\b", r"\bstatic website\b", r"\binfo\b",
+    r"\binformation\b", r"\bconsultation\b", r"\bgeneral\b"
+]
+
+
+def refine_priority(text: str, detected_priority: str) -> str:
+    """
+    Ensures that low priority enquiries are not inappropriately classified as Medium.
+    """
+    if not text:
+        return detected_priority or "Low"
+
+    t = normalize_text(text)
+
+    # 1. High priority keywords take precedence
+    for p in HIGH_KEYWORDS:
+        if re.search(p, t):
+            return "High"
+
+    # 2. Check for low priority indicators
+    has_low = any(re.search(p, t) for p in LOW_PRIORITY_PATTERNS)
+    has_complex = any(re.search(p, t) for p in [r"\berp\b", r"\bcrm\b", r"\benterprise\b", r"\bcomplex\b", r"\bpayroll\b", r"\binventory system\b"])
+
+    if has_low and not has_complex:
+        return "Low"
+
+    # 3. If detected as Medium, but lacks explicit urgency or complex business scope, default to Low
+    if detected_priority == "Medium" and not has_complex:
+        has_urgency = any(re.search(p, t) for p in MEDIUM_KEYWORDS)
+        if not has_urgency:
+            return "Low"
+
+    return detected_priority or "Low"
 
 CANCEL_WORDS = [
     "cancel", "stop", "nevermind", "never mind", "forget it", "forget that",
@@ -116,26 +334,46 @@ def classify_category(text):
 
 def classify_priority(text):
     t = normalize_text(text)
+    priority = "Low"
     for p in HIGH_KEYWORDS:
         if re.search(p, t):
             return "High"
     for p in MEDIUM_KEYWORDS:
         if re.search(p, t):
-            return "Medium"
-    return "Low"
+            priority = "Medium"
+            break
+    return refine_priority(text, priority)
 
 
 def generate_summary(text):
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    summary = " ".join(sentences[:2])
-    return summary[:300] + ("..." if len(summary) > 300 else "")
+    if not text:
+        return "Customer sent an enquiry requiring review."
+    cleaned = re.sub(r"(?im)^[ \t]*(subject|from|to|date|sent):[^\r\n]*[\r\n]?", "", text or "")
+    cleaned = re.sub(r"(?m)^[ \t]*>[^\r\n]*[\r\n]?", "", cleaned)
+    cleaned = re.sub(r"(?is)\nOn .*?wrote:\s*.*$", "", cleaned)
+    # Strip greetings like "Hi sir,", "Dear team,"
+    cleaned = re.sub(r"(?i)^(?:dear|hi|hello|hey)\s+[^,\n]+[,:\n]?", "", cleaned.strip()).strip()
+    # Strip sign-offs
+    cleaned = re.sub(r"(?i)(?:thanks|thank you|regards|best regards|cheers|sincerely)[^\n]*$", "", cleaned).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    category = classify_category(text)
+    # Extract the first substantive sentence
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', cleaned) if len(s.strip()) > 5]
+    if sentences:
+        core = sentences[0]
+        if len(core) > 150:
+            core = core[:147] + "..."
+        return f"{category} enquiry regarding: {core}"
+    return f"{category} enquiry requiring review."
 
 
 def _keyword_analyse(text):
+    summary = generate_summary(text)
     return {
         "category": classify_category(text),
         "priority": classify_priority(text),
-        "ai_summary": generate_summary(text),
+        "ai_summary": summary,
     }
 
 
@@ -173,6 +411,9 @@ def _keyword_intent(text):
     then small_talk/thanks/compliment, then other.
     """
     t = normalize_text(text).strip()
+
+    if is_edit_delete_request(t):
+        return "edit_delete_query"
 
     if _contains_any(t, CANCEL_WORDS):
         return "cancel"
@@ -215,35 +456,52 @@ def _keyword_intent(text):
 
 
 # ─────────────────────────────────────────────────
-# GEMINI LLM ANALYSIS — covers category + priority + summary
+# GROQ LLM ANALYSIS — covers category + priority + summary
 # ─────────────────────────────────────────────────
-def _gemini_analyse(text):
+def _groq_analyse(text: str) -> dict:
     prompt = (
         "You are an assistant for a software company's client enquiry system.\n"
-        "Read the enquiry below and respond with ONLY a JSON object — no markdown, no explanation:\n\n"
+        "Analyze the customer's enquiry below and respond with ONLY a JSON object:\n\n"
         "{\n"
         f'  "category": one of {VALID_CATEGORIES},\n'
-        '  "priority": one of "High", "Medium", "Low",\n'
-        '  "ai_summary": a professional 1-2 sentence summary written the way a support agent would '
-        'log it (state what the client needs/reports and the impact, e.g. '
-        '"Client reports website login failure preventing customer access and requests urgent technical support.")\n'
+        '  "priority": one of "High", "Medium", "Low". Priority Rules:\n'
+        '     * "High": System down, server crash, payment gateway broken, customers cannot login, production blocker, or explicit urgent timeline ("urgent", "asap", "immediately", "today", "emergency").\n'
+        '     * "Medium": Complex enterprise solutions (ERP, CRM, custom multi-module portal), active bugs with a workaround, or major projects with explicit upcoming deadlines ("this week", "soon", "launching next month").\n'
+        '     * "Low": General inquiries, quotes/pricing/cost estimates, simple/basic/portfolio websites, landing pages, blogs, minor cosmetic/text tweaks, future planning ("next year", "sometime in future"), non-urgent requests ("whenever", "no rush"), or any standard inquiry without immediate deadlines. NOTE: Default to "Low" for ordinary enquiries, quotes, and standard websites unless explicit urgency or enterprise complexity is stated.\n'
+        '  "ai_summary": a concise 1-sentence summary (10-25 words) capturing what the customer needs or reports (e.g. "Customer requesting urgent fix for crashed yoga website ahead of Monday sale"). NEVER copy the raw text verbatim, and omit greetings, pleasantries, and email signatures,\n'
+        '  "is_legitimate": boolean, true for any genuine customer request, enquiry, question, bug report, or business requirement (even if brief, general, or preliminary); false ONLY if the text is pure gibberish/keysmash (e.g. "jvjldvblhdbv"), Lorem Ipsum Latin filler, or explicit dummy/placeholder text (e.g. "dummy text", "asdfasdf").\n'
+        '  "rejection_reason": string explaining why it is not legitimate if is_legitimate is false, otherwise null\n'
         "}\n\n"
-        f"Enquiry: {text}"
+        f"Enquiry:\n{text}"
     )
 
-    model = genai.GenerativeModel(
-        GEMINI_MODEL_NAME,
-        generation_config={"response_mime_type": "application/json", "temperature": 0.3}
+    response_text = _generate_with_groq(
+        prompt,
+        json_mode=True,
+        temperature=0.2,
+        max_tokens=350
     )
-    response = model.generate_content(prompt)
-    result = json.loads(response.text)
+    clean_text = response_text.strip()
+    if clean_text.startswith("```"):
+        clean_text = re.sub(r"^```(?:json)?\n?", "", clean_text)
+        clean_text = re.sub(r"\n?```$", "", clean_text).strip()
+
+    result = json.loads(clean_text)
 
     if result.get("category") not in VALID_CATEGORIES:
         result["category"] = classify_category(text)
-    if result.get("priority") not in VALID_PRIORITIES:
-        result["priority"] = classify_priority(text)
+    raw_pri = result.get("priority")
+    if raw_pri not in VALID_PRIORITIES:
+        raw_pri = classify_priority(text)
+    result["priority"] = refine_priority(text, raw_pri)
+
     if not result.get("ai_summary"):
         result["ai_summary"] = generate_summary(text)
+    else:
+        result["ai_summary"] = result["ai_summary"].strip()
+
+    result["is_legitimate"] = bool(result.get("is_legitimate", True))
+    result["rejection_reason"] = result.get("rejection_reason")
     return result
 
 
@@ -252,15 +510,43 @@ def _gemini_analyse(text):
 # ─────────────────────────────────────────────────
 def analyse(text: str) -> dict:
     if not text or len(text.strip()) < 3:
-        return {"category": "General", "priority": "Low", "ai_summary": ""}
+        return {
+            "category": "General",
+            "priority": "Low",
+            "ai_summary": "",
+            "is_legitimate": False,
+            "rejection_reason": "Text is too short.",
+        }
 
-    if GEMINI_API_KEY:
+    is_legit, reason = validate_enquiry_legitimacy(text)
+    if not is_legit:
+        return {
+            "category": "General",
+            "priority": "Low",
+            "ai_summary": "",
+            "is_legitimate": False,
+            "rejection_reason": reason,
+        }
+
+    if GROQ_API_KEY:
         try:
-            return _gemini_analyse(text)
+            res = _groq_analyse(text)
+            if "is_legitimate" not in res:
+                res["is_legitimate"] = True
+            rej_reason = (res.get("rejection_reason") or "").lower()
+            if not res["is_legitimate"] and any(term in rej_reason for term in ["vague", "detail", "brief", "short", "clarif", "specific", "insufficient", "actionable"]):
+                res["is_legitimate"] = True
+                res["rejection_reason"] = None
+            if "priority" in res:
+                res["priority"] = refine_priority(text, res["priority"])
+            return res
         except Exception as e:
-            print(f"⚠️  Gemini API failed ({e}), using keyword fallback.")
+            print(f"[AI Service] Groq API call failed: {e}. Using keyword fallback.")
 
-    return _keyword_analyse(text)
+    kw = _keyword_analyse(text)
+    kw["is_legitimate"] = True
+    kw["rejection_reason"] = None
+    return kw
 
 
 # ─────────────────────────────────────────────────
@@ -269,13 +555,13 @@ def analyse(text: str) -> dict:
 def detect_intent(text: str) -> dict:
     """
     Classifies free-text chat input into one of VALID_INTENTS.
-    Uses Gemini if available, else falls back to keyword matching
+    Uses Groq if available, else falls back to keyword matching
     so the chatbot still works without an API key.
     """
     if not text or len(text.strip()) < 2:
         return {"intent": "other"}
 
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         return {"intent": _keyword_intent(text)}
 
     prompt = f"""You are an intent classification engine.
@@ -285,6 +571,7 @@ Classify the user message into EXACTLY one intent.
 Allowed intents:
 new_enquiry
 status_check
+edit_delete_query
 faq
 greeting
 small_talk
@@ -297,6 +584,13 @@ cancel
 other
 
 Examples:
+"edit enquiry" -> edit_delete_query
+"delete enquiry" -> edit_delete_query
+"i want to delete my enquiry" -> edit_delete_query
+"can i edit my query" -> edit_delete_query
+"how can i delete ticket #14" -> edit_delete_query
+"modify my previous request" -> edit_delete_query
+"cancel my existing enquiry" -> edit_delete_query
 "hi" -> greeting
 "hello" -> greeting
 "hey" -> greeting
@@ -339,8 +633,7 @@ Examples:
 "give me a quote" -> pricing
 "rough estimate" -> pricing
 
-Respond ONLY JSON.
-
+Respond with ONLY a JSON object:
 {{
   "intent": "..."
 }}
@@ -350,12 +643,17 @@ Message:
 """
 
     try:
-        model = genai.GenerativeModel(
-            GEMINI_MODEL_NAME,
-            generation_config={"response_mime_type": "application/json", "temperature": 0}
+        response_text = _generate_with_groq(
+            prompt,
+            json_mode=True,
+            temperature=0,
+            max_tokens=150
         )
-        response = model.generate_content(prompt)
-        result = json.loads(response.text)
+        clean_text = response_text.strip()
+        if clean_text.startswith("```"):
+            clean_text = re.sub(r"^```(?:json)?\n?", "", clean_text)
+            clean_text = re.sub(r"\n?```$", "", clean_text).strip()
+        result = json.loads(clean_text)
         keyword_intent = _keyword_intent(text)
 
         # Problem-language should always win over a vague follow_up/other guess
@@ -365,11 +663,10 @@ Message:
         if result.get("intent") not in VALID_INTENTS:
             result["intent"] = keyword_intent
 
-        print("INTENT DETECTED:", result)
         return result
 
     except Exception as e:
-        print("⚠️  Intent detection failed:", e)
+        print("[AI Service] Intent detection fallback:", e)
         return {"intent": _keyword_intent(text)}
 
 
@@ -377,18 +674,20 @@ Message:
 # CHATBOT FREE-TEXT REPLY — for greeting / small_talk / thanks /
 # compliment / faq / services_info / pricing / other intents
 # ─────────────────────────────────────────────────
-def generate_chat_reply(message: str, intent: str = None) -> str:
+def generate_chat_reply(message: str, intent: str = None, chat_history: list = None) -> str:
     """
     Returns a conversational reply for free-text chat messages.
     `intent` can be passed in if already known (e.g. from detect_intent),
-    otherwise it's computed here. Canned replies handle the "small talk"
-    style intents instantly (fast + consistent); everything else that
-    needs real language goes to Gemini if available.
+    otherwise it's computed here.
+    Supports multi-turn `chat_history` for natural, context-aware dialogue.
     """
     if intent is None:
         intent = detect_intent(message).get("intent", "other")
 
-    # Fast, consistent canned replies — no need to hit the LLM for these
+    if intent == "edit_delete_query" or is_edit_delete_request(message):
+        return SUPPORT_CONTACT_MSG
+
+    # Fast, consistent canned replies — no need to hit the LLM for simple greetings
     if intent == "greeting":
         return "Hello 👋\nHow can I help you today?"
 
@@ -402,7 +701,7 @@ def generate_chat_reply(message: str, intent: str = None) -> str:
         return "You're welcome!\nFeel free to ask if you need anything else."
 
     if intent == "pricing":
-        if not GEMINI_API_KEY:
+        if not GROQ_API_KEY:
             return PRICING_TEXT
         
         base_prompt = (
@@ -412,17 +711,17 @@ def generate_chat_reply(message: str, intent: str = None) -> str:
             f"{PRICING_TEXT}\n\nCustomer question: {message}"
         )
         try:
-            model = genai.GenerativeModel(
-                GEMINI_MODEL_NAME,
-                generation_config={"temperature": 0.4, "max_output_tokens": 200}
+            response_text = _generate_with_groq(
+                base_prompt,
+                temperature=0.4,
+                max_tokens=200
             )
-            response = model.generate_content(base_prompt)
-            return response.text.strip() or PRICING_TEXT
+            return response_text.strip() or PRICING_TEXT
         except Exception as e:
-            print("Pricing reply generation failed:", e)
+            print("[AI Service] Pricing reply generation failed:", e)
             return PRICING_TEXT
 
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         if intent in ("faq", "services_info"):
             return (
                 "I'm Eva, the Enquiry Portal assistant. "
@@ -430,45 +729,95 @@ def generate_chat_reply(message: str, intent: str = None) -> str:
             )
         return FALLBACK_UNKNOWN_TEXT
 
-    prompt = f"""You are Eva, a customer support assistant for our software company.
+    system_prompt = f"""You are Eva, an intelligent customer support assistant for our software company.
 
 Company services: Website Development, Web Applications, Mobile Applications,
 ERP Systems, CRM Systems, E-Commerce, Cloud, Automation, AI Solutions,
 API Integration, Hosting, Maintenance, Technical Support, Software Consulting.
 
-You can naturally:
-- greet users
-- make small talk briefly and steer back to how you can help
-- answer pricing questions (use these figures if relevant: Website from ₹10,000;
-  Business website ₹25,000–₹75,000; Mobile app ₹50,000+; ERP/CRM depends on modules;
-  final quote depends on scope)
-- answer questions about our services and how the enquiry portal works
-- respond briefly and warmly to compliments and thanks
-- politely redirect anything unrelated to our company/services back to raising an
-  enquiry or asking about our services — do not answer general knowledge, personal,
-  or off-topic questions
-
-Rules:
-- Do NOT repeatedly re-introduce yourself ("I'm Eva...") in every message.
-- Be friendly, natural, and concise — maximum 80 words.
-- Do not invent pricing beyond what's given above.
-- If key information is missing for an enquiry, ask one short follow-up question.
-- Sound like a real support agent, not a generic chatbot.
-
-Customer Message:
-{message}
+Capabilities:
+- Greet users and answer queries in natural, friendly, conversational language.
+- Answer pricing questions: Website from ₹10,000; Business website ₹25,000–₹75,000;
+  Mobile app ₹50,000+; ERP/CRM depends on modules; final quote depends on scope.
+- If the user asks to edit, update, modify, cancel, or delete an existing enquiry or query, reply: "To edit or delete an existing enquiry, please reach out to : nas4.crm@gmail.com".
+- Answer questions about our company, software services, and enquiry process.
+- If the customer corrects you or gives feedback, adapt smoothly without repeating rigid canned lines.
+- Keep responses friendly, natural, and concise (under 80 words).
+- Sound like a real consultant, not a robotic script.
 """
 
+    groq_msgs = [{"role": "system", "content": system_prompt}]
+    if chat_history:
+        for h in chat_history[-6:]:
+            if isinstance(h, dict) and "role" in h and "content" in h:
+                groq_msgs.append({"role": h["role"], "content": h["content"]})
+    groq_msgs.append({"role": "user", "content": message})
+
     try:
-        model = genai.GenerativeModel(
-            GEMINI_MODEL_NAME,
-            generation_config={"temperature": 0.7, "max_output_tokens": 200}
+        response_text = _generate_with_groq(
+            messages=groq_msgs,
+            temperature=0.7,
+            max_tokens=220
         )
-        response = model.generate_content(prompt)
-        return response.text.strip() or FALLBACK_UNKNOWN_TEXT
+        return response_text.strip() or FALLBACK_UNKNOWN_TEXT
     except Exception as e:
-        print("Support Agent Error:", e)
+        print("[AI Service] Support Agent Error:", e)
         return "Sorry, I'm having trouble answering right now."
+
+
+def refine_enquiry_with_feedback(current_context: dict, user_feedback: str) -> dict:
+    """
+    Learns from user feedback/corrections to update an in-progress enquiry draft.
+    Takes existing context and incorporates user modifications via Groq LLM.
+    """
+    current_context = dict(current_context or {})
+    cat = current_context.get("category", "General")
+    prio = current_context.get("priority", "Medium")
+    desc = current_context.get("description", "")
+    summ = current_context.get("ai_summary", "")
+
+    if not GROQ_API_KEY:
+        return merge_enquiry_context(current_context, user_feedback)
+
+    prompt = f"""You are Eva, an intelligent customer support assistant for a software company.
+A customer has an in-progress enquiry draft:
+- Current Category: {cat}
+- Current Priority: {prio}
+- Current Description: {desc}
+- Current Summary: {summ}
+
+The customer just gave this feedback, correction, or additional requirement:
+"{user_feedback}"
+
+Update the enquiry details adaptively based on the customer's instruction.
+Keep unchanged fields consistent, and update category, priority, description, or requirements as requested.
+
+Respond with ONLY a JSON object:
+{{
+  "category": one of {VALID_CATEGORIES},
+  "priority": "High" | "Medium" | "Low",
+  "description": complete updated description combining previous details with the customer's changes,
+  "ai_summary": concise 1-sentence summary (10-25 words) reflecting the updated requirement
+}}
+"""
+    try:
+        response_text = _generate_with_groq(prompt, json_mode=True, temperature=0.2, max_tokens=300)
+        clean = response_text.strip()
+        if clean.startswith("```"):
+            clean = re.sub(r"^```(?:json)?\n?", "", clean)
+            clean = re.sub(r"\n?```$", "", clean).strip()
+        res = json.loads(clean)
+        if res.get("category") not in VALID_CATEGORIES:
+            res["category"] = cat
+        if res.get("priority") not in VALID_PRIORITIES:
+            res["priority"] = prio
+        if not res.get("ai_summary"):
+            res["ai_summary"] = summ
+        res["is_legitimate"] = True
+        return res
+    except Exception as e:
+        print("[AI Service] Refine enquiry feedback fallback:", e)
+        return merge_enquiry_context(current_context, user_feedback)
 
 
 # ─────────────────────────────────────────────────
@@ -518,75 +867,76 @@ def merge_enquiry_context(existing_context: dict, new_message: str) -> dict:
 # EMAIL REPLY GENERATION
 # ─────────────────────────────────────────────────
 def generate_response(enquiry):
-    enquiry_id = getattr(enquiry, "id", None)
-    id_line = f"Your enquiry ID is #{enquiry_id}.\n\n" if enquiry_id else ""
+    customer_name = getattr(enquiry, "customer_name", "Customer") or "Customer"
+    summary = (getattr(enquiry, "ai_summary", "") or "").strip()
+    if not summary:
+        summary = generate_summary(getattr(enquiry, "description", ""))
 
-    fallback = (
-        f"Dear {enquiry.customer_name},\n\n"
+    enquiry_id = getattr(enquiry, "id", None)
+    id_line = f"Enquiry ID: #{enquiry_id}\n\n" if enquiry_id else ""
+
+    return (
+        f"Dear {customer_name},\n\n"
         "Thank you for contacting us.\n\n"
-        f"We have received your enquiry regarding: {enquiry.ai_summary or enquiry.description}\n\n"
+        f"We have received your enquiry regarding: {summary}\n\n"
         f"{id_line}"
-        "Our team has started reviewing the details and will update you shortly.\n\n"
-        "Regards,\nSmart Enquiry Team"
+        "Our team will reach back shortly to assist you.\n\n"
+        "Best regards,\nSmart Enquiry Team"
     )
 
-    if not GEMINI_API_KEY:
-        return fallback
 
-    prompt = f"""Write a polite, professional first email reply for this client enquiry.
-Follow this structure and tone:
+def generate_followup_draft(enquiry, customer_name="Customer", message_body=""):
+    """
+    Drafts an AI-assisted response for an employee to review and edit when
+    a customer sends a follow-up reply in an ongoing email thread.
+    """
+    clean_body = re.sub(r"(?m)^[ \t]*>[^\r\n]*[\r\n]?", "", message_body or "")
+    clean_body = re.sub(r"(?is)\nOn .*?wrote:\s*.*$", "", clean_body).strip()
+    name = customer_name or getattr(enquiry, "customer_name", "Customer") or "Customer"
 
-Dear {enquiry.customer_name},
-
-Thank you for contacting us.
-
-We have received your enquiry regarding [brief restatement of the issue/request].
-
-{"Your enquiry ID is #" + str(enquiry_id) + "." if enquiry_id else ""}
-
-Our team has started reviewing the issue / your request and will update you shortly.
-
-Regards,
-Smart Enquiry Team
-
-Rules:
-- Keep it under 90 words.
-- Do not promise pricing or timelines.
-- Do not invent an enquiry ID if none is given above.
-
-Client: {enquiry.customer_name}
-Category: {enquiry.category}
-Priority: {enquiry.priority}
-Summary: {enquiry.ai_summary}
-Original message:
-\"\"\"{enquiry.description}\"\"\"
-"""
-
-    try:
-        model = genai.GenerativeModel(
-            GEMINI_MODEL_NAME,
-            generation_config={"temperature": 0.4, "max_output_tokens": 200}
+    if GROQ_API_KEY and clean_body:
+        prompt = (
+            "You are a professional customer support representative for a software services company.\n"
+            f"The customer '{name}' sent this follow-up message in an ongoing email thread:\n"
+            f"'''{clean_body}'''\n\n"
+            "Draft a helpful, polite, and concise reply (2-4 sentences) addressing their follow-up message. "
+            "Do not include placeholders like '[Your Name]' or '[Company Name]'. "
+            "Sign off as 'Best regards,\nSmart Enquiry Team'."
         )
-        response = model.generate_content(prompt)
-        return response.text.strip() or fallback
-    except Exception as e:
-        print("Reply generation failed:", e)
-        return fallback
+        try:
+            draft = _generate_with_groq(prompt, temperature=0.4, max_tokens=250)
+            if draft:
+                return draft.strip()
+        except Exception as e:
+            print("[AI Service] Follow-up draft generation fallback:", e)
+
+    return (
+        f"Dear {name},\n\n"
+        "Thank you for your update.\n\n"
+        "We have received your message and our team is currently reviewing the details. "
+        "We will get back to you with the next steps shortly.\n\n"
+        "Best regards,\nSmart Enquiry Team"
+    )
 
 
-def classify_and_summarise(text):
+def classify_and_summarise(text, customer_name="Customer", enquiry_id=None):
     result = analyse(text)
+    summary = (result.get("ai_summary") or "").strip() or generate_summary(text)
 
     class DraftEnquiry:
-        customer_name = "Customer"
-        description = text
-        category = result["category"]
-        priority = result["priority"]
-        ai_summary = result["ai_summary"]
+        pass
+
+    draft_enq = DraftEnquiry()
+    draft_enq.customer_name = customer_name or "Customer"
+    draft_enq.description = text
+    draft_enq.category = result["category"]
+    draft_enq.priority = result["priority"]
+    draft_enq.ai_summary = summary
+    draft_enq.id = enquiry_id
 
     return {
         "category": result["category"],
         "priority": result["priority"],
-        "summary": result["ai_summary"],
-        "suggested_reply": generate_response(DraftEnquiry()),
+        "summary": summary,
+        "suggested_reply": generate_response(draft_enq),
     }

@@ -64,40 +64,143 @@ export default function App() {
 
 function AppShell({ user, onLogout, children }) {
   const { pathname } = useLocation();
-  const a = p => pathname === p ? 'nav-link active fw-semibold text-white' : 'nav-link text-white-50';
+
+  const navLinkStyle = (path) => {
+    const active = pathname === path;
+    return {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '6px',
+      padding: '7px 14px',
+      borderRadius: '8px',
+      fontSize: '0.875rem',
+      fontWeight: active ? '600' : '500',
+      color: active ? '#ffffff' : 'rgba(255, 255, 255, 0.78)',
+      background: active ? 'rgba(255, 255, 255, 0.18)' : 'transparent',
+      textDecoration: 'none',
+      transition: 'all 0.15s ease',
+    };
+  };
 
   return (
-    <>
-      <nav className="navbar navbar-dark bg-primary px-4 py-2">
-        <span className="navbar-brand fw-bold">📋 Enquiry Portal</span>
+    <div style={{ minHeight: '100vh', background: '#f8fafc', display: 'flex', flexDirection: 'column' }}>
+      <nav style={{
+        background: 'linear-gradient(90deg, #3730a3 0%, #4f46e5 100%)',
+        boxShadow: '0 2px 10px rgba(55, 48, 163, 0.15)',
+        padding: '10px 28px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '12px',
+        position: 'sticky',
+        top: 0,
+        zIndex: 1000,
+      }}>
+        {/* Brand */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{
+            width: 34,
+            height: 34,
+            borderRadius: 8,
+            background: 'rgba(255, 255, 255, 0.18)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: 18,
+          }}>
+            📋
+          </div>
+          <div>
+            <span style={{ fontWeight: 700, fontSize: '1.05rem', color: '#ffffff', letterSpacing: '-0.2px' }}>
+              Enquiry Portal
+            </span>
+          </div>
+        </div>
 
+        {/* Navigation Links */}
         {user.role === 'admin' && (
-          <div className="navbar-nav d-flex flex-row ms-3 gap-1">
-            <Link className={a('/dashboard')}  to="/dashboard">Dashboard</Link>
-            <Link className={a('/enquiries')}  to="/enquiries">All Enquiries</Link>
-            <Link className={a('/clients')}    to="/clients">Clients</Link>
-            <Link className={a('/add')}        to="/add">+ New</Link>
-            <Link className={a('/automation')} to="/automation">📧 Email</Link>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+            <Link style={navLinkStyle('/dashboard')} to="/dashboard">📊 Dashboard</Link>
+            <Link style={navLinkStyle('/enquiries')} to="/enquiries">📋 All Enquiries</Link>
+            <Link style={navLinkStyle('/clients')} to="/clients">👥 Clients</Link>
+            <Link style={navLinkStyle('/add')} to="/add">➕ New Enquiry</Link>
+            <Link style={navLinkStyle('/automation')} to="/automation">📧 Email Automation</Link>
           </div>
         )}
 
         {user.role === 'client' && (
-          <div className="navbar-nav d-flex flex-row ms-3">
-            <Link className={a('/chat')} to="/chat">💬 My Enquiries</Link>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <Link style={navLinkStyle('/chat')} to="/chat">💬 My Enquiries</Link>
           </div>
         )}
 
-        <div className="ms-auto d-flex align-items-center gap-3">
-          <span className="text-white-50 small">
-            {user.role === 'admin' ? '🔑 Admin' : '👤 Client'} — {user.name}
-          </span>
-          <button className="btn btn-outline-light btn-sm" onClick={onLogout}>Logout</button>
+        {/* User profile & Logout */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '4px 12px 4px 6px',
+            background: 'rgba(255, 255, 255, 0.12)',
+            borderRadius: '20px',
+            border: '1px solid rgba(255, 255, 255, 0.18)',
+          }}>
+            <div style={{
+              width: 26,
+              height: 26,
+              borderRadius: '50%',
+              background: user.role === 'admin' ? '#f59e0b' : '#38bdf8',
+              color: '#ffffff',
+              fontSize: '0.75rem',
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}>
+              {user.role === 'admin' ? 'A' : 'C'}
+            </div>
+            <span style={{ color: '#ffffff', fontSize: '0.825rem', fontWeight: 500 }}>
+              {user.name}
+            </span>
+            <span style={{
+              fontSize: '0.68rem',
+              padding: '2px 7px',
+              borderRadius: '10px',
+              background: user.role === 'admin' ? 'rgba(245, 158, 11, 0.28)' : 'rgba(56, 189, 248, 0.28)',
+              color: user.role === 'admin' ? '#fef3c7' : '#e0f2fe',
+              fontWeight: 600,
+              textTransform: 'uppercase',
+              letterSpacing: '0.3px',
+            }}>
+              {user.role}
+            </span>
+          </div>
+
+          <button
+            onClick={onLogout}
+            style={{
+              padding: '6px 14px',
+              borderRadius: '8px',
+              fontSize: '0.825rem',
+              fontWeight: 500,
+              color: '#ffffff',
+              background: 'transparent',
+              border: '1px solid rgba(255, 255, 255, 0.35)',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+            onMouseOver={e => e.currentTarget.style.background = 'rgba(255, 255, 255, 0.15)'}
+            onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+          >
+            Logout
+          </button>
         </div>
       </nav>
 
-      <div className="container-fluid mt-3 px-4">
+      <main style={{ flex: 1, padding: '24px 32px' }}>
         {children}
-      </div>
-    </>
+      </main>
+    </div>
   );
 }

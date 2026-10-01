@@ -236,7 +236,7 @@ async function startChat() {
         <div className="col-lg-5">
           <div className="card">
             <div className="card-header bg-dark text-white py-2 d-flex justify-content-between align-items-center">
-              <strong>📂 My Enquiries</strong>
+              <strong>My Enquiries</strong>
               <button className="btn btn-sm btn-outline-light" onClick={loadMyEnquiries}>Refresh</button>
             </div>
             <div className="card-body p-2" style={{ maxHeight: 560, overflowY: 'auto' }}>
@@ -258,7 +258,7 @@ async function startChat() {
                     <span className="text-muted">{e.created_at}</span>
                   </div>
                   {e.follow_up_date && (
-                    <div className="small text-muted mt-1">📅 Next follow-up: {e.follow_up_date}</div>
+                    <div className="small text-muted mt-1">Next follow-up: {e.follow_up_date}</div>
                   )}
                   {e.notes && (
                     <div className="small mt-1" style={{ background:'#f8f9fa', borderRadius:6, padding:'4px 8px' }}>
@@ -272,7 +272,7 @@ async function startChat() {
 
           {/* Email channel info */}
           <div className="card mt-3">
-            <div className="card-header py-2"><strong>✉️ Prefer email?</strong></div>
+            <div className="card-header py-2"><strong>Prefer email?</strong></div>
             <div className="card-body p-2 small text-muted">
               You can also email us directly at{' '}
               <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a> — our system

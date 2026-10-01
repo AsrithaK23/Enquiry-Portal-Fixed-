@@ -5,6 +5,7 @@ import re
 from email.header import decode_header
 from email.utils import parseaddr
 import smtplib
+import uuid
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -97,6 +98,8 @@ def fetch_unread_emails(limit=10, mark_seen=False):
             body = _message_body(message)
             emails.append({
                 "message_id": message.get("Message-ID") or msg_id.decode(),
+                "in_reply_to": _decode(message.get("In-Reply-To")),
+                "references": _decode(message.get("References")),
                 "subject": _decode(message.get("Subject")) or "(no subject)",
                 "sender_name": sender_name or sender_email or "Email Sender",
                 "sender_email": sender_email,
@@ -113,10 +116,11 @@ def fetch_unread_emails(limit=10, mark_seen=False):
             pass
         mailbox.logout()
 
-def send_reply(to_email: str, subject: str, body: str) -> dict:
+def send_reply(to_email: str, subject: str, body: str, in_reply_to: str = None, references: str = None) -> dict:
     """
     Sends the drafted reply via SMTP.
-    Returns {"sent": True} or {"sent": False, "error": "..."}
+    Attaches RFC In-Reply-To and References headers to maintain the email thread.
+    Returns {"sent": True, "message_id": "..."} or {"sent": False, "error": "..."}
     """
     smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.getenv("SMTP_PORT", 587))
@@ -130,10 +134,34 @@ def send_reply(to_email: str, subject: str, body: str) -> dict:
             "error": "Email sending is not configured. Add these values to poc/backend/.env: " + ", ".join(missing),
         }
 
+    clean_subject = (subject or "Your enquiry").strip()
+    if not re.match(r"^re\s*:\s*", clean_subject, flags=re.IGNORECASE):
+        clean_subject = f"Re: {clean_subject}"
+
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Re: {subject}" if not subject.startswith("Re:") else subject
+    msg["Subject"] = clean_subject
     msg["From"]    = username
     msg["To"]      = to_email
+
+    # Generate RFC message ID
+    domain = username.split("@")[-1] if "@" in username else "smart-enquiry-portal"
+    generated_msg_id = f"<{uuid.uuid4()}@{domain}>"
+    msg["Message-ID"] = generated_msg_id
+
+    # Attach thread headers if replying to a known inbound email
+    if in_reply_to:
+        in_reply_to_clean = in_reply_to.strip()
+        if not in_reply_to_clean.startswith("<") and in_reply_to_clean:
+            in_reply_to_clean = f"<{in_reply_to_clean}>"
+        msg["In-Reply-To"] = in_reply_to_clean
+
+        # Build References chain
+        ref_parts = []
+        if references:
+            ref_parts.extend(re.findall(r"<[^>]+>", references))
+        if in_reply_to_clean not in ref_parts:
+            ref_parts.append(in_reply_to_clean)
+        msg["References"] = " ".join(ref_parts)
 
     msg.attach(MIMEText(body, "plain"))
 
@@ -143,6 +171,6 @@ def send_reply(to_email: str, subject: str, body: str) -> dict:
             server.starttls()
             server.login(username, password)
             server.sendmail(username, to_email, msg.as_string())
-        return {"sent": True}
+        return {"sent": True, "message_id": generated_msg_id}
     except Exception as e:
         return {"sent": False, "error": str(e)}
