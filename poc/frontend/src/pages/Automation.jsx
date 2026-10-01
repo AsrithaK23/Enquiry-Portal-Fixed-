@@ -8,6 +8,7 @@ export default function Automation() {
   const [markSeen, setMarkSeen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
+  const [drafts, setDrafts] = useState({});
   const [error, setError] = useState('');
 
   async function syncEmail() {
@@ -20,10 +21,26 @@ export default function Automation() {
         mark_seen: markSeen,
       });
       setResult(response.data);
+      setDrafts(Object.fromEntries((response.data.imported || []).map(item => [item.id, item.suggested_response || ''])));
     } catch (e) {
       setError(e.response?.data?.error || 'Email sync failed. Check backend email settings.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function sendManualReply(item) {
+    try {
+      const response = await API.post(`/api/automation/enquiries/${item.id}/reply`, {
+        body: drafts[item.id] || '',
+        send: true,
+      });
+      setResult(previous => ({
+        ...previous,
+        imported: previous.imported.map(current => current.id === item.id ? response.data : current),
+      }));
+    } catch (e) {
+      setError(e.response?.data?.error || 'Manual reply failed.');
     }
   }
 
@@ -32,15 +49,15 @@ export default function Automation() {
     const statusMap = {
       'auto_sent': { 
         className: 'badge bg-success', 
-        label: '✅ Auto-Sent' 
+        label: 'Auto-Sent' 
       },
       'pending_manual': { 
         className: 'badge bg-warning text-dark', 
-        label: '⏳ Manual Review' 
+        label: 'Manual Review' 
       },
       'send_failed': { 
         className: 'badge bg-danger', 
-        label: '❌ Failed' 
+        label: 'Failed' 
       }
     };
     
@@ -139,7 +156,17 @@ export default function Automation() {
                     <td><span className={`badge bg-${PRI[item.priority] || 'secondary'}`}>{item.priority}</span></td>
                     <td className="small text-muted">{item.ai_summary}</td>
                     <td className="small" style={{ maxWidth: '280px', whiteSpace: 'pre-wrap' }}>
-                      {item.suggested_response}
+                      <textarea
+                        className="form-control form-control-sm"
+                        rows="4"
+                        value={drafts[item.id] ?? item.suggested_response ?? ''}
+                        onChange={e => setDrafts(previous => ({ ...previous, [item.id]: e.target.value }))}
+                      />
+                      {item.reply_status === 'pending_manual' && (
+                        <button className="btn btn-outline-primary btn-sm mt-1" onClick={() => sendManualReply(item)}>
+                          Save &amp; Send
+                        </button>
+                      )}
                     </td>
                     <td>{renderReplyStatus(item.reply_status)}</td>
                   </tr>

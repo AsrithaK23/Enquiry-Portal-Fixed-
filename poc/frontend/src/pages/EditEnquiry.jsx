@@ -7,14 +7,23 @@ const PRI    = { High:'danger', Medium:'warning', Low:'success' };
 const BADGE  = { New:'primary','In Discussion':'warning',Quoted:'secondary',Closed:'success',Dropped:'danger' };
 const STATUSES = ['New','In Discussion','Quoted','Closed','Dropped'];
 
+function getTodayLocal() {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 export default function EditEnquiry() {
   const { id }     = useParams();
   const navigate   = useNavigate();
-  const [enq,    setEnq]    = useState(null);
-  const [form,   setForm]   = useState({ status:'', follow_up_date:'', notes:'' });
-  const [saved,  setSaved]  = useState(false);
-  const [error,  setError]  = useState('');
-  const [genSum, setGenSum] = useState('');
+  const [enq,       setEnq]       = useState(null);
+  const [form,      setForm]      = useState({ status:'', follow_up_date:'', notes:'' });
+  const [saved,     setSaved]     = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [formError, setFormError] = useState('');
+  const [genSum,    setGenSum]    = useState('');
   const [sumLoading, setSumLoading] = useState(false);
 
   useEffect(() => {
@@ -27,7 +36,7 @@ export default function EditEnquiry() {
           notes:          r.data.notes,
         });
       })
-      .catch(() => setError('Could not load enquiry.'));
+      .catch(() => setLoadError('Could not load enquiry.'));
   }, [id]);
 
   function handleChange(e) {
@@ -37,13 +46,22 @@ export default function EditEnquiry() {
 
   async function handleUpdate(e) {
     e.preventDefault();
+    setFormError('');
+
+    const today = getTodayLocal();
+    if (form.follow_up_date && form.follow_up_date < today) {
+      setFormError('Follow-up date cannot be in the past. Please select today or a future date.');
+      return;
+    }
+
     try {
       const r = await API.put(`/api/enquiries/${id}`, form);
       setEnq(r.data);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch {
-      setError('Update failed.');
+    } catch (err) {
+      const serverMsg = err.response?.data?.error || 'Update failed.';
+      setFormError(serverMsg);
     }
   }
 
@@ -61,14 +79,19 @@ export default function EditEnquiry() {
     }
   }
 
-  if (error) return <div className="alert alert-danger mt-3">{error}</div>;
+  if (loadError) return <div className="alert alert-danger mt-3">{loadError}</div>;
   if (!enq)  return <p className="mt-3 text-muted">Loading...</p>;
 
   return (
     <div>
-      <button className="btn btn-sm btn-secondary mb-3" onClick={() => navigate('/enquiries')}>
-        ← Back to List
-      </button>
+      <div className="d-flex justify-content-between align-items-center mb-3">
+        <button className="btn btn-sm btn-secondary" onClick={() => navigate('/enquiries')}>
+          ← Back to List
+        </button>
+        <h5 className="mb-0 text-muted">
+          Enquiry <span className="badge bg-secondary font-monospace" style={{ fontSize: '1rem' }}>#{enq.id}</span>
+        </h5>
+      </div>
 
       <div className="row g-3">
         <div className="col-md-7">
@@ -134,7 +157,8 @@ export default function EditEnquiry() {
           <div className="card">
             <div className="card-header py-2 bg-success text-white"><strong>Update Enquiry</strong></div>
             <div className="card-body">
-              {saved && <div className="alert alert-success py-1 small">✅ Saved!</div>}
+              {saved && <div className="alert alert-success py-1 small mb-2">✅ Saved!</div>}
+              {formError && <div className="alert alert-danger py-1 small mb-2">{formError}</div>}
               <form onSubmit={handleUpdate}>
 
                 <div className="mb-2">
@@ -148,7 +172,7 @@ export default function EditEnquiry() {
                 <div className="mb-2">
                   <label className="form-label form-label-sm">Next Action / Follow-up Date</label>
                   <input name="follow_up_date" value={form.follow_up_date} onChange={handleChange}
-                    className="form-control form-control-sm" type="date"/>
+                    className="form-control form-control-sm" type="date" min={getTodayLocal()}/>
                 </div>
 
                 <div className="mb-3">

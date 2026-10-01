@@ -1,11 +1,27 @@
 from flask import Blueprint, request, jsonify, g
 from database import db
 from models import User, Client
-import hashlib, os, time
+import hashlib, os, time, re
 from functools import wraps
 
 auth_bp = Blueprint("auth", __name__)
 TOKENS = {}
+
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}$")
+
+
+def validate_password_strength(password: str) -> tuple[bool, str]:
+    if not password or len(password) < 8:
+        return False, "Password must be at least 8 characters long."
+    if not re.search(r"[A-Z]", password):
+        return False, "Password must contain at least one uppercase letter (A-Z)."
+    if not re.search(r"[a-z]", password):
+        return False, "Password must contain at least one lowercase letter (a-z)."
+    if not re.search(r"[0-9]", password):
+        return False, "Password must contain at least one number (0-9)."
+    if not re.search(r"[^A-Za-z0-9]", password):
+        return False, "Password must contain at least one special character (e.g. !@#$%^&*)."
+    return True, ""
 
 
 def generate_token(user_id):
@@ -34,35 +50,40 @@ def require_auth(f):
 
 @auth_bp.route("/api/auth/register", methods=["POST"])
 def register():
-    data = request.get_json()
-    if not data.get("email") or not data.get("password") or not data.get("name"):
-        return jsonify({"error": "name, email and password required"}), 400
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    raw_email = (data.get("email") or "").strip()
+    password = data.get("password") or ""
 
-    # Normalize the same way email-intake does (services/email_service.py /
-    # routes/automation.py both lower-case the sender address before storing
-    # or looking up a Client). Without this, "Test@gmail.com" at signup and
-    # "test@gmail.com" from an inbound email are treated as two different
-    # people, so a new user never sees enquiries that came in by email.
-    email = data["email"].strip().lower()
+    if not name or not raw_email or not password:
+        return jsonify({"error": "Name, email, and password are required."}), 400
+
+    email = raw_email.lower()
+    if not EMAIL_REGEX.match(email):
+        return jsonify({"error": "Please enter a valid email address (e.g. name@example.com or user@domain.in)."}), 400
+
+    valid_pwd, pwd_error = validate_password_strength(password)
+    if not valid_pwd:
+        return jsonify({"error": pwd_error}), 400
 
     if User.query.filter_by(email=email).first():
-        return jsonify({"error": "Email already registered"}), 400
+        return jsonify({"error": "An account with this email is already registered."}), 400
 
-    role = data.get("role", "client")
-    client_id = None
-    if role == "client":
-        client = Client.query.filter_by(email=email).first()
-        if not client:
-            client = Client(
-                name=data["name"], email=email,
-                phone=data.get("phone", ""), company=data.get("company", ""),
-            )
-            db.session.add(client)
-            db.session.flush()
-        client_id = client.id
+    # Public sign-up is strictly restricted to 'client' role to prevent privilege escalation
+    role = "client"
 
-    user = User(name=data["name"], email=email, role=role, client_id=client_id)
-    user.set_password(data["password"])
+    client = Client.query.filter_by(email=email).first()
+    if not client:
+        client = Client(
+            name=name, email=email,
+            phone=data.get("phone", ""), company=data.get("company", ""),
+        )
+        db.session.add(client)
+        db.session.flush()
+    client_id = client.id
+
+    user = User(name=name, email=email, role=role, client_id=client_id)
+    user.set_password(password)
     db.session.add(user)
     db.session.commit()
 

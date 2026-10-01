@@ -2,7 +2,16 @@ import re
 from flask import Blueprint, request, jsonify
 from database import db
 from models import Client, Enquiry, ActivityLog, ChatSession, ChatMessage
-from services.ai_service import analyse, detect_intent as _detect_intent, generate_chat_reply
+from services.ai_service import (
+    analyse,
+    detect_intent as _detect_intent,
+    generate_chat_reply,
+    is_edit_delete_request,
+    is_start_enquiry_phrase,
+    validate_enquiry_legitimacy,
+    refine_enquiry_with_feedback,
+    SUPPORT_CONTACT_MSG
+)
 
 chat_bp = Blueprint("chat", __name__)
 
@@ -18,6 +27,24 @@ QUICK_CANCEL_PHRASES = {
 QUESTION_STARTERS = ("how ", "what ", "why ", "when ", "where ", "who ",
                      "can you", "do you", "does it", "is it", "are you",
                      "could you", "would you", "will you")
+
+
+def get_session_history(session_id, limit=6):
+    if not session_id:
+        return []
+    msgs = (
+        ChatMessage.query.filter_by(session_id=session_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    history = []
+    for m in reversed(msgs):
+        history.append({
+            "role": "assistant" if m.sender == "bot" else "user",
+            "content": m.message
+        })
+    return history
 
 
 def detect_intent(user_input):
@@ -183,6 +210,13 @@ def chat_message():
 
     user_msg(session, user_input)
 
+    # Global check: if user asks to edit or delete any query/enquiry
+    if is_edit_delete_request(user_input):
+        reply = SUPPORT_CONTACT_MSG
+        bot_reply(session, reply)
+        db.session.commit()
+        return jsonify({"state": state, "message": reply, "context": context})
+
     if state != "identify" and user_input.lower() in QUICK_CANCEL_PHRASES:
         reply = "No problem — I've cancelled that. What else can I help you with?"
         bot_reply(session, reply)
@@ -230,6 +264,13 @@ def chat_message():
 
     elif state == "returning":
         intent = detect_intent(user_input).get("intent", "other")
+        history = get_session_history(session.id)
+
+        if intent == "edit_delete_query" or is_edit_delete_request(user_input):
+            reply = SUPPORT_CONTACT_MSG
+            bot_reply(session, reply)
+            db.session.commit()
+            return jsonify({"state": "returning", "message": reply, "context": context})
 
         if intent == "greeting":
             reply = (
@@ -241,14 +282,8 @@ def chat_message():
             db.session.commit()
             return jsonify({"state": "returning", "message": reply, "context": context})
 
-        elif intent == "faq":
-            reply = generate_chat_reply(user_input)
-            bot_reply(session, reply)
-            db.session.commit()
-            return jsonify({"state": "returning", "message": reply, "context": context})
-
-        elif intent == "services_info":
-            reply = generate_chat_reply(user_input)
+        elif intent in ("faq", "services_info"):
+            reply = generate_chat_reply(user_input, intent=intent, chat_history=history)
             bot_reply(session, reply)
             db.session.commit()
             return jsonify({"state": "returning", "message": reply, "context": context})
@@ -262,8 +297,39 @@ def chat_message():
             return jsonify({"state": "returning", "message": reply, "context": context})
 
         elif intent == "new_enquiry":
+            # 1. Did the user express the intent to start/raise an enquiry?
+            if is_start_enquiry_phrase(user_input):
+                reply = (
+                    "Absolutely 👍\n\nTell me a bit more about what you need and I'll create an enquiry for you. "
+                    "(Type **cancel** anytime if you change your mind.)"
+                )
+                bot_reply(session, reply)
+                db.session.commit()
+                return jsonify({"state": "describe", "message": reply, "context": context})
+
+            # 2. Check for actual lorem ipsum / keysmash / placeholder
+            is_legit, reason = validate_enquiry_legitimacy(user_input)
+            if not is_legit:
+                reply = (
+                    "It looks like your message contains placeholder or unrecognized text.\n\n"
+                    "Could you please provide a legitimate enquiry describing what you need help with "
+                    "(for example, the type of service, features needed, or issue faced)?"
+                )
+                bot_reply(session, reply)
+                db.session.commit()
+                return jsonify({"state": "describe", "message": reply, "context": context})
+
             ai_preview = analyse(user_input)
-            is_specific = len(user_input.strip()) >= 15 and ai_preview["category"] != "General"
+            if not ai_preview.get("is_legitimate", True):
+                reply = (
+                    "Could you please share a few more details about what you need "
+                    "(for example, the type of service, features needed, or issue faced)?"
+                )
+                bot_reply(session, reply)
+                db.session.commit()
+                return jsonify({"state": "describe", "message": reply, "context": context})
+
+            is_specific = len(user_input.strip()) >= 15 and ai_preview.get("category") != "General"
 
             if is_specific:
                 context["description"] = user_input
@@ -300,7 +366,7 @@ def chat_message():
             return jsonify({"state": "returning", "message": reply, "context": context})
 
         else:
-            reply = generate_chat_reply(user_input)
+            reply = generate_chat_reply(user_input, intent=intent, chat_history=history)
             bot_reply(session, reply)
             db.session.commit()
             return jsonify({"state": "returning", "message": reply, "context": context})
@@ -340,10 +406,27 @@ def chat_message():
     elif state == "describe":
         intent = detect_intent(user_input).get("intent", "other")
         is_question = looks_like_question(user_input)
+        history = get_session_history(session.id)
+
+        if intent == "edit_delete_query" or is_edit_delete_request(user_input):
+            reply = SUPPORT_CONTACT_MSG
+            bot_reply(session, reply)
+            db.session.commit()
+            return jsonify({"state": "describe", "message": reply, "context": context})
+
+        if is_start_enquiry_phrase(user_input):
+            reply = (
+                "I'm ready! Please describe what you need help with — for example, "
+                "are you looking to build a website, a mobile app, an ERP/CRM system, "
+                "or do you have a technical bug or issue that needs fixing?"
+            )
+            bot_reply(session, reply)
+            db.session.commit()
+            return jsonify({"state": "describe", "message": reply, "context": context})
 
         if intent in ("faq", "services_info", "greeting") or (intent == "other" and is_question):
             reply = (
-                generate_chat_reply(user_input)
+                generate_chat_reply(user_input, intent=intent, chat_history=history)
                 + "\n\nWhenever you're ready, just describe what you need and I'll log it for you."
             )
             bot_reply(session, reply)
@@ -361,14 +444,29 @@ def chat_message():
             db.session.commit()
             return jsonify({"state": "describe", "message": reply, "context": context})
 
-        if len(user_input.strip()) < 8:
-            reply = "Could you tell me a little more about what you need? A sentence or two would really help our team."
+        # Check legitimacy of enquiry details (lorem ipsum, keysmash, gibberish)
+        is_legit, reason = validate_enquiry_legitimacy(user_input)
+        if not is_legit:
+            reply = (
+                "It looks like your message contains placeholder or unrecognized text.\n\n"
+                "Could you please provide a legitimate enquiry describing what you need help with "
+                "(for example, the type of service, features needed, or issue faced)?"
+            )
             bot_reply(session, reply)
             db.session.commit()
             return jsonify({"state": "describe", "message": reply, "context": context})
 
         ai = analyse(user_input)
-        if ai["category"] == "General" and len(user_input.strip()) < 25:
+        if not ai.get("is_legitimate", True):
+            reply = (
+                "Could you please share a few more details about what you need "
+                "(for example, the type of service, features needed, or issue faced)?"
+            )
+            bot_reply(session, reply)
+            db.session.commit()
+            return jsonify({"state": "describe", "message": reply, "context": context})
+
+        if ai.get("category") == "General" and len(user_input.strip()) < 20:
             reply = (
                 "Could you give me a bit more detail — for example, what kind of service this "
                 "relates to (website, app, ERP, etc.) and what's going wrong or what you need?"
@@ -460,15 +558,21 @@ def chat_message():
         if no_match:
             remainder = no_match.group(2).strip()
 
-            if len(remainder) >= 8:
-                ai = analyse(remainder)
-                context["description"] = remainder
-                context["ai"] = ai
+            if len(remainder) >= 5:
+                current_draft = {
+                    "category": context.get("ai", {}).get("category", "General"),
+                    "priority": context.get("ai", {}).get("priority", "Medium"),
+                    "description": context.get("description", ""),
+                    "ai_summary": context.get("ai", {}).get("ai_summary", ""),
+                }
+                updated = refine_enquiry_with_feedback(current_draft, remainder)
+                context["ai"] = updated
+                context["description"] = updated.get("description", context.get("description", ""))
                 reply = (
-                    "No problem, here's the updated version:\n\n"
-                    f"🏷️ Service area: **{ai['category']}**\n"
-                    f"⚡ Priority: **{ai['priority']}**\n"
-                    f"📝 Summary: {ai['ai_summary']}\n\n"
+                    "No problem, I've updated your enquiry details:\n\n"
+                    f"🏷️ Service area: **{updated['category']}**\n"
+                    f"⚡ Priority: **{updated['priority']}**\n"
+                    f"📝 Summary: {updated['ai_summary']}\n\n"
                     "Shall I go ahead and submit this instead? (**yes** / **no** / **cancel**)"
                 )
                 bot_reply(session, reply)
@@ -476,15 +580,23 @@ def chat_message():
                 return jsonify({"state": "confirm", "message": reply, "context": context})
 
             reply = (
-                "No worries — go ahead and describe it again, and I'll re-read it. "
-                "(Or type **cancel** if you'd rather not raise this right now.)"
+                "No problem! What would you like to adjust or add to the enquiry? "
+                "Just tell me what needs changing and I'll update it for you. "
+                "(Or type **cancel** anytime to discard this draft.)"
             )
             bot_reply(session, reply)
             db.session.commit()
-            return jsonify({"state": "describe", "message": reply, "context": context})
+            return jsonify({"state": "confirm", "message": reply, "context": context})
+
+        if is_edit_delete_request(user_input):
+            reply = SUPPORT_CONTACT_MSG
+            bot_reply(session, reply)
+            db.session.commit()
+            return jsonify({"state": "confirm", "message": reply, "context": context})
 
         intent = detect_intent(user_input).get("intent", "other")
         is_question = looks_like_question(user_input)
+        history = get_session_history(session.id)
 
         if intent in ("faq", "services_info", "pricing") or is_question:
             if intent == "pricing":
@@ -496,11 +608,11 @@ def chat_message():
                     "The final cost depends on features, integrations, design, and timelines."
                 )
             else:
-                answer_reply = generate_chat_reply(user_input)
+                answer_reply = generate_chat_reply(user_input, intent=intent, chat_history=history)
 
             reply = (
                 f"{answer_reply}\n\n"
-                "Getting back to it — shall I go ahead and submit your enquiry? "
+                "Getting back to your enquiry draft — shall I go ahead and submit this to our team? "
                 "(**yes** / **no** / **cancel**)"
             )
             bot_reply(session, reply)
@@ -524,9 +636,42 @@ def chat_message():
             db.session.commit()
             return jsonify({"state": "confirm", "message": reply, "context": context})
 
+        # Adaptive feedback: User provides corrections, modifications, or extra requirements
+        if len(user_input.strip()) >= 5:
+            is_legit, reason = validate_enquiry_legitimacy(user_input)
+            if not is_legit and len(user_input.strip()) > 15:
+                reply = (
+                    "It looks like your message contains placeholder or unrecognized text.\n\n"
+                    "Could you clarify the changes you'd like to make to your enquiry, or reply **yes** to submit the current draft?"
+                )
+                bot_reply(session, reply)
+                db.session.commit()
+                return jsonify({"state": "confirm", "message": reply, "context": context})
+
+            current_draft = {
+                "category": context.get("ai", {}).get("category", "General"),
+                "priority": context.get("ai", {}).get("priority", "Medium"),
+                "description": context.get("description", ""),
+                "ai_summary": context.get("ai", {}).get("ai_summary", ""),
+            }
+            updated = refine_enquiry_with_feedback(current_draft, user_input)
+            context["ai"] = updated
+            context["description"] = updated.get("description", context.get("description", ""))
+
+            reply = (
+                "Got it! I've updated your enquiry based on your feedback:\n\n"
+                f"🏷️ Service area: **{updated['category']}**\n"
+                f"⚡ Priority: **{updated['priority']}**\n"
+                f"📝 Summary: {updated['ai_summary']}\n\n"
+                "Shall I go ahead and submit this to our team? (**yes** / **no** / **cancel**)"
+            )
+            bot_reply(session, reply)
+            db.session.commit()
+            return jsonify({"state": "confirm", "message": reply, "context": context})
+
         reply = (
             "Just to confirm — should I submit this to our team?\n\n"
-            "Reply with **yes**, **no**, or **cancel**."
+            "Reply with **yes** to submit, or tell me any changes you'd like to make. (Type **cancel** to discard.)"
         )
         bot_reply(session, reply)
         db.session.commit()

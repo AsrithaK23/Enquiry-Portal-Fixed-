@@ -47,6 +47,6 @@ if __name__ == "__main__":
             admin.set_password("admin123")
             db.session.add(admin)
             db.session.commit()
-            print("✅ Default admin created: admin@portal.com / admin123")
-    print("🚀 Backend running at http://localhost:5000")
+            print("[Admin] Default admin created: admin@portal.com / admin123")
+    print("[Server] Backend running at http://localhost:5000")
     app.run(debug=True, port=5000)

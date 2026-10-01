@@ -1,20 +1,41 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import API from '../api/axios';
 
+const EMAIL_REGEX = /^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}$/;
+
 export default function Login({ onLogin }) {
-  const [isSignUp, setIsSignUp] = useState(false);
-  const [name,     setName]     = useState('');
-  const [email,    setEmail]    = useState('');
-  const [password, setPassword] = useState('');
-  const [role,     setRole]     = useState('client');
-  const [error,    setError]    = useState('');
-  const [loading,  setLoading]  = useState(false);
+  const [isSignUp,      setIsSignUp]      = useState(false);
+  const [name,          setName]          = useState('');
+  const [email,         setEmail]         = useState('');
+  const [password,      setPassword]      = useState('');
+  const [showPassword,  setShowPassword]  = useState(false);
+  const [error,         setError]         = useState('');
+  const [loading,       setLoading]       = useState(false);
+
+  const passwordCriteria = useMemo(() => [
+    { id: 'len',   label: 'At least 8 characters',       met: password.length >= 8 },
+    { id: 'upper', label: '1 uppercase letter (A-Z)',    met: /[A-Z]/.test(password) },
+    { id: 'lower', label: '1 lowercase letter (a-z)',    met: /[a-z]/.test(password) },
+    { id: 'num',   label: '1 number (0-9)',              met: /[0-9]/.test(password) },
+    { id: 'spec',  label: '1 special character (!@#$..)', met: /[^A-Za-z0-9]/.test(password) },
+  ], [password]);
+
+  const metCount = passwordCriteria.filter(c => c.met).length;
+  const isPasswordValid = metCount === 5;
+
+  const strength = useMemo(() => {
+    if (!password) return { label: '', percent: 0, color: '#e0e0e0' };
+    if (metCount <= 2) return { label: 'Weak', percent: 25, color: '#e74c3c' };
+    if (metCount === 3) return { label: 'Fair', percent: 50, color: '#f39c12' };
+    if (metCount === 4) return { label: 'Good', percent: 75, color: '#3498db' };
+    return { label: 'Strong', percent: 100, color: '#27ae60' };
+  }, [password, metCount]);
 
   async function handleLogin(e) {
     e.preventDefault();
     setError(''); setLoading(true);
     try {
-      const res = await API.post('/api/auth/login', { email, password });
+      const res = await API.post('/api/auth/login', { email: email.trim(), password });
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
       onLogin(res.data.user);
@@ -27,9 +48,32 @@ export default function Login({ onLogin }) {
 
   async function handleRegister(e) {
     e.preventDefault();
-    setError(''); setLoading(true);
+    setError('');
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !EMAIL_REGEX.test(trimmedEmail)) {
+      setError('Please enter a valid email address (e.g. name@example.com or user@domain.in).');
+      return;
+    }
+
+    if (!isPasswordValid) {
+      if (password.length < 8) {
+        setError('Password must be at least 8 characters long.');
+      } else if (!/[A-Z]/.test(password)) {
+        setError('Password must contain at least one uppercase letter (A-Z).');
+      } else if (!/[a-z]/.test(password)) {
+        setError('Password must contain at least one lowercase letter (a-z).');
+      } else if (!/[0-9]/.test(password)) {
+        setError('Password must contain at least one number (0-9).');
+      } else {
+        setError('Password must contain at least one special character (e.g. !@#$%^&*).');
+      }
+      return;
+    }
+
+    setLoading(true);
     try {
-      const res = await API.post('/api/auth/register', { name, email, password, role });
+      const res = await API.post('/api/auth/register', { name: name.trim(), email: trimmedEmail, password });
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
       onLogin(res.data.user);
@@ -56,7 +100,7 @@ export default function Login({ onLogin }) {
           <div key={isSignUp ? 'su' : 'si'} className="ep-fade" style={{ width: '100%' }}>
             <h2 style={S.heading}>{isSignUp ? 'Create Account' : 'Welcome Back'}</h2>
             <p style={S.subheading}>
-              {isSignUp ? 'Sign up to raise and track enquiries' : 'Log in to your account'}
+              {isSignUp ? 'Sign up to raise and track your enquiries' : 'Log in to your account'}
             </p>
 
             {error && <div style={S.error}>{error}</div>}
@@ -71,34 +115,90 @@ export default function Login({ onLogin }) {
               )}
 
               <div style={S.field}>
-                <label style={S.label}>Email</label>
+                <label style={S.label}>Email Address</label>
                 <input className="ep-input" style={S.input} type="email" value={email}
                   onChange={e => setEmail(e.target.value)} required placeholder="you@example.com"/>
               </div>
 
               <div style={S.field}>
-                <label style={S.label}>Password</label>
-                <input className="ep-input" style={S.input} type="password" value={password}
-                  onChange={e => setPassword(e.target.value)} required placeholder="********"/>
-              </div>
-
-              {isSignUp && (
-                <div style={S.field}>
-                  <label style={S.label}>I am a</label>
-                  <div style={S.roleRow}>
-                    <button type="button"
-                      style={role==='client' ? S.roleActive : S.roleBtn}
-                      onClick={() => setRole('client')}>
-                      Client
-                    </button>
-                    <button type="button"
-                      style={role==='admin' ? S.roleActive : S.roleBtn}
-                      onClick={() => setRole('admin')}>
-                      Admin / Staff
-                    </button>
-                  </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <label style={S.label}>Password</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#6c63ff',
+                      fontSize: 11,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      padding: 0,
+                      marginBottom: 6,
+                    }}
+                  >
+                    {showPassword ? 'Hide' : 'Show'}
+                  </button>
                 </div>
-              )}
+                <input
+                  className="ep-input"
+                  style={S.input}
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  required
+                  placeholder={isSignUp ? 'Min. 8 characters with upper, number, symbol' : '********'}
+                />
+
+                {isSignUp && (
+                  <div style={{ marginTop: 7 }}>
+                    <div style={{
+                      height: 4,
+                      width: '100%',
+                      background: '#ede7dd',
+                      borderRadius: 4,
+                      overflow: 'hidden',
+                      marginBottom: 5,
+                    }}>
+                      <div style={{
+                        height: '100%',
+                        width: `${strength.percent}%`,
+                        background: strength.color,
+                        transition: 'all 0.3s ease',
+                      }} />
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6 }}>
+                      <span style={{ color: '#8882a4' }}>Password Strength:</span>
+                      <strong style={{ color: strength.color }}>{strength.label || 'Required'}</strong>
+                    </div>
+
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1fr 1fr',
+                      gap: '3px 6px',
+                      fontSize: 10.5,
+                      background: '#f8f4ec',
+                      padding: '7px 10px',
+                      borderRadius: 8,
+                      border: '1px solid #ece4d7',
+                    }}>
+                      {passwordCriteria.map(c => (
+                        <div key={c.id} style={{
+                          color: c.met ? '#27ae60' : '#888195',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 4,
+                          fontWeight: c.met ? 600 : 400,
+                        }}>
+                          <span>{c.met ? '✓' : '○'}</span>
+                          <span>{c.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {!isSignUp && (
                 <div style={S.demoBox}>
@@ -107,7 +207,7 @@ export default function Login({ onLogin }) {
               )}
 
               <button type="submit" style={S.submitBtn} disabled={loading}>
-                {loading ? 'Please wait...' : (isSignUp ? 'Sign up' : 'Log in')}
+                {loading ? 'Please wait...' : (isSignUp ? 'Create Account' : 'Log in')}
               </button>
             </form>
           </div>
@@ -136,38 +236,29 @@ const S = {
     background: '#f0f2f5', fontFamily: "'Inter', system-ui, sans-serif", padding: 16,
   },
   card: {
-    display: 'flex', width: '100%', maxWidth: 820, minHeight: 520,
+    display: 'flex', width: '100%', maxWidth: 840, minHeight: 540,
     borderRadius: 24, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,.12)',
     background: '#fdf6ec', flexWrap: 'wrap',
   },
   left: {
-    flex: '1 1 360px', padding: '40px 44px', display: 'flex', flexDirection: 'column',
+    flex: '1 1 360px', padding: '34px 42px', display: 'flex', flexDirection: 'column',
     justifyContent: 'center', position: 'relative',
   },
   brand: {
-    position: 'absolute', top: 24, left: 44, fontWeight: 700, color: '#6c63ff', fontSize: 15,
+    position: 'absolute', top: 22, left: 42, fontWeight: 700, color: '#6c63ff', fontSize: 15,
   },
-  heading: { color: '#6c63ff', fontWeight: 800, fontSize: 28, marginBottom: 4 },
-  subheading: { color: '#9089b5', fontSize: 13, marginBottom: 22 },
+  heading: { color: '#6c63ff', fontWeight: 800, fontSize: 26, marginBottom: 4 },
+  subheading: { color: '#9089b5', fontSize: 13, marginBottom: 18 },
   error: {
     background: '#fde2e2', color: '#c0392b', borderRadius: 8, padding: '8px 12px',
     fontSize: 13, marginBottom: 14,
   },
-  field: { marginBottom: 14 },
-  label: { display: 'block', fontSize: 12, fontWeight: 700, color: '#6c63ff', marginBottom: 6 },
+  field: { marginBottom: 13 },
+  label: { display: 'block', fontSize: 12, fontWeight: 700, color: '#6c63ff', marginBottom: 5 },
   input: {
-    width: '100%', padding: '11px 14px', borderRadius: 10,
+    width: '100%', padding: '10px 14px', borderRadius: 10,
     border: '1.5px solid #e6dfd3', background: '#fffdf9',
     fontSize: 14, color: '#444', transition: 'all .15s',
-  },
-  roleRow: { display: 'flex', gap: 10 },
-  roleBtn: {
-    flex: 1, padding: '10px 8px', borderRadius: 10, fontSize: 13, fontWeight: 600,
-    border: '1.5px solid #e6dfd3', background: '#fffdf9', color: '#9089b5', cursor: 'pointer',
-  },
-  roleActive: {
-    flex: 1, padding: '10px 8px', borderRadius: 10, fontSize: 13, fontWeight: 700,
-    border: '1.5px solid #6c63ff', background: '#6c63ff', color: '#fff', cursor: 'pointer',
   },
   demoBox: {
     background: '#fff3e0', color: '#a3700a', borderRadius: 8, padding: '8px 12px',

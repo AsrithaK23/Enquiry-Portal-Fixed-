@@ -7,7 +7,7 @@ export default function Navbar() {
 
   return (
     <nav className="navbar navbar-expand navbar-dark bg-primary px-4 py-2">
-      <span className="navbar-brand fw-bold">📋 Enquiry Portal</span>
+      <span className="navbar-brand fw-bold">Enquiry Portal</span>
       <div className="navbar-nav ms-3">
         <Link className={active('/dashboard')} to="/dashboard">Dashboard</Link>
         <Link className={active('/enquiries')} to="/enquiries">All Enquiries</Link>

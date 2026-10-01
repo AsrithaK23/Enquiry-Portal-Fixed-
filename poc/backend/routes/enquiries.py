@@ -1,10 +1,14 @@
+import re
 from flask import Blueprint, request, jsonify
 from database import db
-from models import Enquiry, ActivityLog
-from services.ai_service import analyse
+from models import Client, Enquiry, ActivityLog
+from services.ai_service import analyse, validate_enquiry_legitimacy
 from datetime import datetime
 
 enquiries_bp = Blueprint("enquiries", __name__)
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PHONE_DIGITS_RE = re.compile(r"^\d{10}$")
 
 
 def log(enquiry_id, action):
@@ -13,18 +17,76 @@ def log(enquiry_id, action):
 
 @enquiries_bp.route("/api/enquiries", methods=["POST"])
 def create_enquiry():
-    data = request.get_json()
-    if not data.get("customer_name") or not data.get("description"):
-        return jsonify({"error": "customer_name and description are required"}), 400
+    data = request.get_json(silent=True) or {}
+    customer_name = (data.get("customer_name") or "").strip()
+    description   = (data.get("description") or "").strip()
+    email         = (data.get("email") or "").strip().lower()
+    raw_phone     = (data.get("phone") or "").strip()
 
-    ai = analyse(data["description"])
+    # 1. Required Client Name
+    if not customer_name:
+        return jsonify({"error": "Client Name is required."}), 400
+
+    # 2. Compulsory & Valid Email
+    if not email:
+        return jsonify({"error": "Email is compulsory and required."}), 400
+    if not EMAIL_RE.match(email):
+        return jsonify({"error": "Please enter a valid email address (e.g. name@example.com or user@domain.in)."}), 400
+
+    # 3. Phone validation (only digits, 10-15 digits if provided)
+    clean_phone = re.sub(r"[\s\-+]", "", raw_phone)
+    if clean_phone:
+        if not clean_phone.isdigit() or not PHONE_DIGITS_RE.match(clean_phone):
+            return jsonify({"error": "Phone number must contain exactly 10 digits only, without letters or symbols."}), 400
+
+    # 4. Description & Gibberish / Lorem Ipsum Validation
+    if not description:
+        return jsonify({"error": "Description is required."}), 400
+
+    is_legit, reason = validate_enquiry_legitimacy(description)
+    if not is_legit:
+        rej_msg = reason or "Placeholder text or gibberish is not accepted."
+        return jsonify({"error": f"Please provide a legitimate enquiry description ({rej_msg})."}), 400
+
+    ai = analyse(description)
+    if not ai.get("is_legitimate", True):
+        rej_msg = ai.get("rejection_reason") or "Placeholder text or gibberish is not accepted."
+        return jsonify({"error": f"Please provide a legitimate enquiry description ({rej_msg})."}), 400
+
+    # 5. Follow-up date validation (no past date allowed)
+    raw_follow_up = (data.get("follow_up_date") or "").strip()
+    if raw_follow_up:
+        try:
+            f_date = datetime.strptime(raw_follow_up, "%Y-%m-%d").date()
+            if f_date < datetime.now().date():
+                return jsonify({"error": "Follow-up date cannot be in the past. Please select today or a future date."}), 400
+        except ValueError:
+            return jsonify({"error": "Invalid follow-up date format (expected YYYY-MM-DD)."}), 400
+
+    # 6. Client List Sync (creates or updates Client in the database)
+    client = Client.query.filter_by(email=email).first()
+    if not client:
+        client = Client(
+            name=customer_name,
+            email=email,
+            phone=clean_phone,
+            company=data.get("company", ""),
+        )
+        db.session.add(client)
+        db.session.flush()
+    else:
+        if clean_phone and not client.phone:
+            client.phone = clean_phone
+        if customer_name and (not client.name or client.name == "Customer"):
+            client.name = customer_name
 
     enq = Enquiry(
-        customer_name = data["customer_name"].strip(),
-        phone         = data.get("phone", ""),
-        email         = data.get("email", ""),
-        source        = data.get("source", ""),
-        description   = data["description"].strip(),
+        client_id     = client.id,
+        customer_name = customer_name,
+        phone         = clean_phone,
+        email         = email,
+        source        = data.get("source", "Manual"),
+        description   = description,
         category      = ai["category"],
         priority      = ai["priority"],
         ai_summary    = ai["ai_summary"],
@@ -34,7 +96,7 @@ def create_enquiry():
     )
     db.session.add(enq)
     db.session.flush()
-    log(enq.id, f"Enquiry created. Category: {enq.category}, Priority: {enq.priority}")
+    log(enq.id, f"Enquiry created manually. Category: {enq.category}, Priority: {enq.priority}")
     db.session.commit()
     return jsonify(enq.to_dict()), 201
 
@@ -49,12 +111,14 @@ def get_enquiries():
     if status:   query = query.filter(Enquiry.status == status)
     if category: query = query.filter(Enquiry.category == category)
     if search:
-        query = query.filter(
-            db.or_(
-                Enquiry.customer_name.ilike(f"%{search}%"),
-                Enquiry.email.ilike(f"%{search}%"),
-            )
-        )
+        search_num = search.lstrip("#").strip()
+        conditions = [
+            Enquiry.customer_name.ilike(f"%{search}%"),
+            Enquiry.email.ilike(f"%{search}%"),
+        ]
+        if search_num.isdigit():
+            conditions.append(Enquiry.id == int(search_num))
+        query = query.filter(db.or_(*conditions))
 
     enquiries = query.order_by(Enquiry.created_at.desc()).all()
     return jsonify([e.to_dict(include_logs=False) for e in enquiries]), 200
@@ -82,9 +146,17 @@ def update_enquiry(id):
         enq.notes = data["notes"]
 
     if "follow_up_date" in data:
-        if data["follow_up_date"] != enq.follow_up_date:
-            changes.append(f"Follow-up date set to {data['follow_up_date']}")
-        enq.follow_up_date = data["follow_up_date"]
+        raw_follow_up = (data.get("follow_up_date") or "").strip()
+        if raw_follow_up:
+            try:
+                f_date = datetime.strptime(raw_follow_up, "%Y-%m-%d").date()
+                if f_date < datetime.now().date():
+                    return jsonify({"error": "Follow-up date cannot be in the past. Please select today or a future date."}), 400
+            except ValueError:
+                return jsonify({"error": "Invalid follow-up date format (expected YYYY-MM-DD)."}), 400
+        if raw_follow_up != enq.follow_up_date:
+            changes.append(f"Follow-up date set to {raw_follow_up}")
+        enq.follow_up_date = raw_follow_up
 
     if "category" in data: enq.category = data["category"]
     if "priority" in data: enq.priority = data["priority"]
