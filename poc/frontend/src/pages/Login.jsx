@@ -8,6 +8,9 @@ export default function Login({ onLogin }) {
   const [name,          setName]          = useState('');
   const [email,         setEmail]         = useState('');
   const [password,      setPassword]      = useState('');
+  const [role,          setRole]          = useState('client');
+  const [challenge,     setChallenge]     = useState('');
+  const [otp,           setOtp]           = useState('');
   const [showPassword,  setShowPassword]  = useState(false);
   const [error,         setError]         = useState('');
   const [loading,       setLoading]       = useState(false);
@@ -35,12 +38,25 @@ export default function Login({ onLogin }) {
     e.preventDefault();
     setError(''); setLoading(true);
     try {
-      const res = await API.post('/api/auth/login', { email: email.trim(), password });
+      const res = await API.post('/api/auth/login', { email: email.trim(), password, role });
+      setChallenge(res.data.challenge);
+    } catch (err) {
+      setError(err.response?.data?.error || (err.response ? 'Login failed. Please try again.' : 'Could not reach the server at localhost:5000. Start the backend and try again.'));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleVerifyOtp(e) {
+    e.preventDefault();
+    setError(''); setLoading(true);
+    try {
+      const res = await API.post('/api/auth/verify-otp', { challenge, otp: otp.trim() });
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
       onLogin(res.data.user);
     } catch (err) {
-      setError(err.response?.data?.error || 'Login failed');
+      setError(err.response?.data?.error || (err.response ? 'Verification failed. Please try again.' : 'Could not reach the server at localhost:5000. Start the backend and try again.'));
     } finally {
       setLoading(false);
     }
@@ -74,11 +90,9 @@ export default function Login({ onLogin }) {
     setLoading(true);
     try {
       const res = await API.post('/api/auth/register', { name: name.trim(), email: trimmedEmail, password });
-      localStorage.setItem('token', res.data.token);
-      localStorage.setItem('user', JSON.stringify(res.data.user));
-      onLogin(res.data.user);
+      setChallenge(res.data.challenge);
     } catch (err) {
-      setError(err.response?.data?.error || 'Registration failed');
+      setError(err.response?.data?.error || (err.response ? 'Registration failed. Please check your details and try again.' : 'Could not reach the server at localhost:5000. Start the backend and try again.'));
     } finally {
       setLoading(false);
     }
@@ -98,14 +112,33 @@ export default function Login({ onLogin }) {
           <div style={S.brand}>Enquiry Portal</div>
 
           <div key={isSignUp ? 'su' : 'si'} className="ep-fade" style={{ width: '100%' }}>
-            <h2 style={S.heading}>{isSignUp ? 'Create Account' : 'Welcome Back'}</h2>
+            <h2 style={S.heading}>{challenge ? 'Verify your email' : isSignUp ? 'Create Account' : 'Welcome Back'}</h2>
             <p style={S.subheading}>
-              {isSignUp ? 'Sign up to raise and track your enquiries' : 'Log in to your account'}
+              {challenge ? `Enter the 6-digit code sent to ${email.trim()}` : isSignUp ? 'Sign up to raise and track your enquiries' : 'Log in to your account'}
             </p>
 
             {error && <div style={S.error}>{error}</div>}
 
-            <form onSubmit={isSignUp ? handleRegister : handleLogin}>
+            <form onSubmit={challenge ? handleVerifyOtp : (isSignUp ? handleRegister : handleLogin)}>
+              {!isSignUp && !challenge && (
+                <div style={S.field}>
+                  <label style={S.label}>I am a</label>
+                  <select className="ep-input" style={S.input} value={role} onChange={e => setRole(e.target.value)}>
+                    <option value="client">Client</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </div>
+              )}
+              {challenge ? (
+                <div style={S.field}>
+                  <label style={S.label}>Verification code</label>
+                  <input className="ep-input" style={S.input} inputMode="numeric" autoComplete="one-time-code"
+                    value={otp} onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    required minLength={6} maxLength={6} placeholder="6-digit code" />
+                  <div style={S.otpHint}>If no code arrives, check the address. A valid format doesn’t guarantee the mailbox exists.</div>
+                  <button type="button" onClick={() => { setChallenge(''); setOtp(''); setError(''); }} style={{ ...S.switchBtn, color: '#6c63ff', border: 0, padding: '8px 0' }}>{isSignUp ? 'Back to sign up' : 'Back to login'}</button>
+                </div>
+              ) : <>
               {isSignUp && (
                 <div style={S.field}>
                   <label style={S.label}>Full Name</label>
@@ -202,12 +235,15 @@ export default function Login({ onLogin }) {
 
               {!isSignUp && (
                 <div style={S.demoBox}>
-                  <strong>Admin demo:</strong> admin@portal.com / admin123
+                  <strong>Admin demo:</strong> admin@portal.com / admin123<br />
+                  <span>Two-step verification: password, then a code sent to your email.</span>
                 </div>
               )}
+              {isSignUp && <div style={S.twoStepNote}>Verify the email code to create your account and sign in.</div>}
+              </>}
 
               <button type="submit" style={S.submitBtn} disabled={loading}>
-                {loading ? 'Please wait...' : (isSignUp ? 'Create Account' : 'Log in')}
+              {loading ? 'Please wait...' : challenge ? 'Verify and continue' : (isSignUp ? 'Create Account' : 'Continue to email verification')}
               </button>
             </form>
           </div>
@@ -217,12 +253,12 @@ export default function Login({ onLogin }) {
         <div style={{ ...S.right, ...(isSignUp ? S.rightSignUp : {}) }}>
           <div key={isSignUp ? 'right-su' : 'right-si'} className="ep-fade">
             <h1 style={S.getStarted}>{isSignUp ? 'Welcome!' : 'Hello!'}</h1>
-            <p style={S.rightText}>
-              {isSignUp ? 'Already have an account?' : "Don't have an account yet?"}
-            </p>
-            <button style={S.switchBtn} onClick={() => { setError(''); setIsSignUp(!isSignUp); }}>
-              {isSignUp ? 'Log in' : 'Sign up'}
-            </button>
+            {challenge ? <p style={S.rightText}>Check your inbox for your one time verification code.</p> : <>
+              <p style={S.rightText}>{isSignUp ? 'Already have an account?' : "Don't have an account yet?"}</p>
+              <button type="button" style={S.switchBtn} onClick={() => { setError(''); setChallenge(''); setOtp(''); setIsSignUp(!isSignUp); }}>
+                {isSignUp ? 'Log in' : 'Sign up'}
+              </button>
+            </>}
           </div>
         </div>
       </div>
@@ -264,6 +300,8 @@ const S = {
     background: '#fff3e0', color: '#a3700a', borderRadius: 8, padding: '8px 12px',
     fontSize: 12, marginBottom: 16,
   },
+  twoStepNote: { color: '#6c63ff', fontSize: 12, margin: '-4px 0 14px', lineHeight: 1.5 },
+  otpHint: { color: '#777', fontSize: 11, marginTop: 6, lineHeight: 1.4 },
   submitBtn: {
     width: '100%', padding: '13px', borderRadius: 12, border: 'none',
     background: '#7c75ff', color: '#fff', fontWeight: 700, fontSize: 15,

@@ -27,6 +27,7 @@ QUICK_CANCEL_PHRASES = {
 QUESTION_STARTERS = ("how ", "what ", "why ", "when ", "where ", "who ",
                      "can you", "do you", "does it", "is it", "are you",
                      "could you", "would you", "will you")
+SCOPE_REPLY = "I can help with the Enquiry Portal: raising a software or service enquiry, checking its status, or answering questions about our services and pricing. What would you like help with?"
 
 
 def get_session_history(session_id, limit=6):
@@ -366,7 +367,7 @@ def chat_message():
             return jsonify({"state": "returning", "message": reply, "context": context})
 
         else:
-            reply = generate_chat_reply(user_input, intent=intent, chat_history=history)
+            reply = SCOPE_REPLY
             bot_reply(session, reply)
             db.session.commit()
             return jsonify({"state": "returning", "message": reply, "context": context})
@@ -424,11 +425,17 @@ def chat_message():
             db.session.commit()
             return jsonify({"state": "describe", "message": reply, "context": context})
 
-        if intent in ("faq", "services_info", "greeting") or (intent == "other" and is_question):
+        if intent in ("faq", "services_info", "greeting"):
             reply = (
                 generate_chat_reply(user_input, intent=intent, chat_history=history)
                 + "\n\nWhenever you're ready, just describe what you need and I'll log it for you."
             )
+            bot_reply(session, reply)
+            db.session.commit()
+            return jsonify({"state": "describe", "message": reply, "context": context})
+
+        if intent == "other" and is_question:
+            reply = SCOPE_REPLY + "\n\nWhenever you're ready, describe the software or service issue and I'll log it."
             bot_reply(session, reply)
             db.session.commit()
             return jsonify({"state": "describe", "message": reply, "context": context})
